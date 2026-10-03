@@ -79,8 +79,15 @@ impl<P: Port> Station<P> {
         &self.connection
     }
 
+    /// A real device dropped and is expected back. Until the app has it
+    /// again it plays with its own settings, so it is worth looking for it
+    /// more often.
+    pub fn awaits_return(&self) -> bool {
+        self.remembered.is_some() && self.connection == Connection::Demo
+    }
+
     /// Looks for the real device, or checks that it is still ours. Meant to
-    /// be called about once a second.
+    /// be called about once a second, more often while a device is awaited.
     pub fn scan(&mut self) {
         if self.hardware.is_some() {
             // Two programs driving the device steal each other's answers:
@@ -488,6 +495,30 @@ mod tests {
         // Still unplugged: nothing to open.
         station.scan();
         assert_eq!(station.poll().unwrap().connection.state, "demo");
+    }
+
+    #[test]
+    fn a_device_that_dropped_is_awaited_until_it_is_back() {
+        let (first, before) = real_device();
+        let (second, _) = real_device();
+        let (mut station, rival) = station([Ok(first), Err(OpenError::Absent), Ok(second)]);
+        assert!(!station.awaits_return(), "nothing was ever plugged in");
+        station.scan();
+        station.poll().unwrap();
+        assert!(!station.awaits_return());
+
+        before.unplugged.store(true, Ordering::Relaxed);
+        station.poll().unwrap();
+        assert!(station.awaits_return());
+        station.scan();
+        assert!(station.awaits_return(), "still unplugged");
+        station.scan();
+        assert!(!station.awaits_return(), "it is back");
+
+        // A rival is not hurried: it leaves when the user closes it.
+        *rival.lock().unwrap() = Some("GoXLR Utility".into());
+        station.scan();
+        assert!(!station.awaits_return());
     }
 
     #[test]
