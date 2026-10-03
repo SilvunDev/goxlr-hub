@@ -39,6 +39,11 @@ const STARTING_FREQUENCIES: [f32; EqBand::COUNT] = [
     31.5, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
 ];
 
+/// Two bands are kept this far apart, about a sixth of an octave: at the
+/// same frequency, one would hide the other and the curve could not go
+/// through both.
+const BAND_GAP: f32 = 1.12;
+
 /// The equaliser turns a band up or down by 9 dB at most.
 const MAX_EQ_GAIN_DB: i8 = 9;
 
@@ -285,15 +290,20 @@ impl MicState {
     }
 
     /// How far a band can be moved: within its part of the spectrum, and
-    /// never past its neighbours.
+    /// never as far as its neighbours. A band squeezed between two others
+    /// stays where it is.
     pub fn frequency_bounds(&self, band: EqBand) -> (f32, f32) {
         let at = band as usize;
         let (mut min, mut max) = band_range(at);
         if let Some(lower) = at.checked_sub(1) {
-            min = min.max(self.equalizer[lower].frequency);
+            min = min.max(self.equalizer[lower].frequency * BAND_GAP);
         }
         if let Some(higher) = self.equalizer.get(at + 1) {
-            max = max.min(higher.frequency);
+            max = max.min(higher.frequency / BAND_GAP);
+        }
+        if min > max {
+            let here = self.equalizer[at].frequency;
+            return (here, here);
         }
         (min, max)
     }
@@ -393,7 +403,7 @@ impl MicState {
         }
         let points: [EqPoint; EqBand::COUNT] = file.equalizer.try_into().ok()?;
         // Lowest band first: each one stays within its part of the spectrum
-        // and above the one before.
+        // and apart from the one before.
         let mut floor = 0.0_f32;
         for (at, point) in points.into_iter().enumerate() {
             let (min, max) = band_range(at);
@@ -403,7 +413,7 @@ impl MicState {
                 STARTING_FREQUENCIES[at]
             };
             let frequency = wanted.clamp(min.max(floor).min(max), max);
-            floor = frequency;
+            floor = frequency * BAND_GAP;
             mic.equalizer[at] = EqPoint {
                 frequency,
                 gain: point.gain.clamp(-MAX_EQ_GAIN_DB, MAX_EQ_GAIN_DB),
@@ -754,19 +764,51 @@ mod tests {
         assert_eq!(state.effects.len(), 3);
         assert_eq!(state.effects[&EffectKey::EqGain(EqBand::Hz63)], -9);
 
-        // 500 Hz stops at the band above, which now sits at 1500 Hz.
-        assert_eq!(mic.frequency_bounds(EqBand::Hz500), (300.0, 1500.0));
+        // 500 Hz stops short of the band above, which now sits at 1500 Hz:
+        // two bands never share a frequency.
+        let below = 1500.0 / BAND_GAP;
+        let above = 1500.0 * BAND_GAP;
+        assert_eq!(mic.frequency_bounds(EqBand::Hz500), (300.0, below));
         mic.set_eq_band(device.as_mut(), EqBand::Hz500, 1900.0, 0)
             .unwrap();
-        assert_eq!(mic.equalizer[4].frequency, 1500.0);
-        // 2 kHz stops at the end of the middle bands, and at the band below.
-        assert_eq!(mic.frequency_bounds(EqBand::Khz2), (1500.0, 2000.0));
+        assert_eq!(mic.equalizer[4].frequency, below);
+        assert!(below < 1400.0);
+        // 2 kHz stops at the end of the middle bands, and short of the band
+        // below.
+        assert_eq!(mic.frequency_bounds(EqBand::Khz2), (above, 2000.0));
         mic.set_eq_band(device.as_mut(), EqBand::Khz2, 20.0, 0)
             .unwrap();
-        assert_eq!(mic.equalizer[6].frequency, 1500.0);
+        assert_eq!(mic.equalizer[6].frequency, above);
+        // The band between them has nowhere to go.
+        assert_eq!(mic.frequency_bounds(EqBand::Khz1), (1500.0, 1500.0));
+        mic.set_eq_band(device.as_mut(), EqBand::Khz1, 600.0, 2)
+            .unwrap();
+        assert_eq!(
+            (mic.equalizer[5].frequency, mic.equalizer[5].gain),
+            (1500.0, 2)
+        );
         // The ends only have one neighbour.
-        assert_eq!(mic.frequency_bounds(EqBand::Hz31), (30.0, 63.0));
-        assert_eq!(mic.frequency_bounds(EqBand::Khz16), (8000.0, 18000.0));
+        assert_eq!(mic.frequency_bounds(EqBand::Hz31), (30.0, 63.0 / BAND_GAP));
+        assert_eq!(
+            mic.frequency_bounds(EqBand::Khz16),
+            (8000.0 * BAND_GAP, 18000.0)
+        );
+        // Bands that were left at the same place come apart when moved, and
+        // one squeezed between two others stays: never a crash.
+        let mut piled = MicState::unknown();
+        piled.equalizer[1].frequency = 125.0;
+        piled
+            .set_eq_band(device.as_mut(), EqBand::Hz63, 124.0, 1)
+            .unwrap();
+        assert_eq!(piled.equalizer[1].frequency, 125.0 / BAND_GAP);
+        piled.equalizer[0].frequency = 100.0;
+        piled.equalizer[1].frequency = 105.0;
+        piled.equalizer[2].frequency = 110.0;
+        assert_eq!(piled.frequency_bounds(EqBand::Hz63), (105.0, 105.0));
+        piled
+            .set_eq_band(device.as_mut(), EqBand::Hz63, 40.0, 2)
+            .unwrap();
+        assert_eq!(piled.equalizer[1].frequency, 105.0);
 
         mic.set_eq_band(device.as_mut(), EqBand::Khz16, f32::INFINITY, 100)
             .unwrap();

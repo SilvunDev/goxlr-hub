@@ -1280,14 +1280,14 @@ mod tests {
             mic["equalizer"][0],
             json!({
                 "band": "hz31", "frequency": 31.5, "gain": 0,
-                "minFrequency": 30.0, "maxFrequency": 63.0
+                "minFrequency": 30.0, "maxFrequency": 63.0_f32 / 1.12
             })
         );
         assert_eq!(
             mic["equalizer"][5],
             json!({
                 "band": "khz1", "frequency": 1000.0, "gain": 0,
-                "minFrequency": 500.0, "maxFrequency": 2000.0
+                "minFrequency": 500.0_f32 * 1.12, "maxFrequency": 2000.0_f32 / 1.12
             })
         );
         assert_eq!(mic["deEsser"], json!(0));
@@ -1359,9 +1359,10 @@ mod tests {
             (mic.equalizer[2].frequency, mic.equalizer[2].gain),
             (150.0, 4)
         );
-        // The neighbours of the band that moved can now go as far as it.
-        assert_eq!(mic.equalizer[1].max_frequency, 150.0);
-        assert_eq!(mic.equalizer[3].min_frequency, 150.0);
+        // The neighbours of the band that moved can now go nearly as far as
+        // it: two bands never share a frequency.
+        assert_eq!(mic.equalizer[1].max_frequency, 150.0 / 1.12);
+        assert_eq!(mic.equalizer[3].min_frequency, 150.0 * 1.12);
         assert_eq!(mic.de_esser, 25);
     }
 
