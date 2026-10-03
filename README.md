@@ -30,6 +30,10 @@ and the routing, which the device cannot tell: every channel starts live, on
 the default faders (Mic, Chat, Music, System), with a default routing. Volumes
 are left as they are.
 
+The GoXLR keeps no settings of its own. When it is plugged in again it plays
+with everything open until the app takes it back, a fraction of a second
+later: a source that was muted or routed away can be heard for that moment.
+
 - **Windows**: the official TC-Helicon driver must be installed.
 - **Linux**: built and tested by CI, not tried on a real device yet.
 - GoXLR Utility and the official app must be closed: the GoXLR can only be
