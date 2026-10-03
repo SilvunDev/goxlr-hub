@@ -1,0 +1,71 @@
+/* Colours and typefaces come from assets/brand/README.md. */
+:root {
+  --case: #20241f;
+  --panel: #292e28;
+  --unlit: #414a40;
+  --legend: #a3ab9c;
+  --silkscreen: #f1f3ea;
+  --amber: #ffb224;
+
+  --font-ui: 'Schibsted Grotesk Variable', system-ui, sans-serif;
+  --font-mono: 'Martian Mono Variable', ui-monospace, monospace;
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--case);
+  color: var(--silkscreen);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  /* A desktop app, not a document: text is not selectable by default. */
+  user-select: none;
+  cursor: default;
+}
+
+h1,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+/* Labels in Martian Mono are uppercase with slight letter-spacing. */
+.label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--legend);
+}

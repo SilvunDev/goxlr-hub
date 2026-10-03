@@ -17,7 +17,8 @@ https://github.com/user-attachments/assets/a97958d0-c720-4854-b838-77a2eee86ec4
 
 ## Status
 
-Early development. Nothing is usable yet.
+Early development. The app opens, shows its frame in English or French and
+lives in the system tray; it does not talk to the device yet.
 
 ## Goals
 
@@ -39,6 +40,19 @@ Work is tracked with [milestones](../../milestones), one per stage:
 5. Plugin system
 6. First-party plugins
 7. Public release
+
+## Development
+
+You need [Rust](https://rustup.rs/), [Node.js](https://nodejs.org/) 24,
+[pnpm](https://pnpm.io/) and the
+[Tauri prerequisites](https://tauri.app/start/prerequisites/) for your system.
+
+```bash
+pnpm install
+pnpm tauri dev
+```
+
+The Rust code lives in `crates/`, the interface (Svelte) in `ui/`.
 
 ## Contributing
 

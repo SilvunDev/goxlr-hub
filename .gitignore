@@ -13,3 +13,7 @@ dist/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Dependencies and generated files
+node_modules/
+crates/app/gen/
