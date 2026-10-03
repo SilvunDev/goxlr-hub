@@ -21,9 +21,24 @@ export const fr: Messages = {
     tag: 'À venir',
     body: 'Cette section n’est pas encore construite. Elle arrivera dans une prochaine version.',
   },
-  demo: {
-    tag: 'Mode démonstration',
-    body: 'Aucune GoXLR branchée. Vous voyez un appareil virtuel.',
+  connection: {
+    demo: {
+      tag: 'Mode démonstration',
+      body: 'Aucune GoXLR branchée. Vous voyez un appareil virtuel.',
+    },
+    busy: {
+      tag: 'GoXLR occupée',
+      body: 'GoXLR Hub a besoin de la GoXLR pour lui seul. Quittez {program} : la connexion se fait ensuite toute seule. En attendant, vous voyez un appareil virtuel.',
+      otherProgram: 'l’autre logiciel GoXLR',
+    },
+    unsupported: {
+      tag: 'GoXLR Mini',
+      body: 'La GoXLR Mini n’est pas prise en charge : GoXLR Hub fonctionne avec la GoXLR complète. Vous voyez un appareil virtuel.',
+    },
+    unreachable: {
+      tag: 'GoXLR injoignable',
+      body: 'Une GoXLR est branchée mais ne répond pas. Nouvel essai en cours… En attendant, vous voyez un appareil virtuel.',
+    },
   },
   mixer: {
     connecting: 'Connexion…',

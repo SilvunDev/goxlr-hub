@@ -19,9 +19,25 @@ export const en = {
     tag: 'Coming soon',
     body: 'This section is not built yet. It will arrive in a later version.',
   },
-  demo: {
-    tag: 'Demo mode',
-    body: 'No GoXLR connected. You are looking at a virtual device.',
+  // Shown above the virtual device, to say why the real one is not there.
+  connection: {
+    demo: {
+      tag: 'Demo mode',
+      body: 'No GoXLR connected. You are looking at a virtual device.',
+    },
+    busy: {
+      tag: 'GoXLR in use',
+      body: 'GoXLR Hub needs the GoXLR for itself. Quit {program}: the connection is then automatic. Meanwhile, you are looking at a virtual device.',
+      otherProgram: 'the other GoXLR program',
+    },
+    unsupported: {
+      tag: 'GoXLR Mini',
+      body: 'The GoXLR Mini is not supported: GoXLR Hub works with the full-size GoXLR. You are looking at a virtual device.',
+    },
+    unreachable: {
+      tag: 'GoXLR unreachable',
+      body: 'A GoXLR is plugged in but does not answer. Trying again… Meanwhile, you are looking at a virtual device.',
+    },
   },
   mixer: {
     connecting: 'Connecting…',

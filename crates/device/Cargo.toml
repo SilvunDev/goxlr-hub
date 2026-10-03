@@ -1,6 +1,6 @@
 [package]
 name = "goxlr-hub-device"
-description = "One device interface for GoXLR Hub, with a virtual device behind it"
+description = "One device interface for GoXLR Hub, with a real or a virtual device behind it"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,4 +10,5 @@ publish = false
 
 [dependencies]
 goxlr-hub-protocol = { path = "../protocol" }
+goxlr-hub-transport = { path = "../transport" }
 thiserror = "2"
