@@ -53,6 +53,9 @@ Every pull request runs formatting, linting, tests and a secret scan. Run them
 locally before pushing:
 
 ```bash
+pnpm check
+pnpm test
+pnpm build
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all

@@ -46,6 +46,8 @@ jobs:
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
           ./gitleaks git --redact --no-banner
 
+  # Builds and tests the app. The job keeps its historical name because the
+  # branch protection of main requires "rust (<os>)".
   rust:
     strategy:
       fail-fast: false
@@ -54,22 +56,29 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - id: detect
-        shell: bash
-        run: echo "manifests=$(git ls-files '*Cargo.toml' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
-      - if: steps.detect.outputs.manifests != ''
-        uses: dtolnay/rust-toolchain@stable
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev libwebkit2gtk-4.1-dev             libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      # The Rust build embeds the interface, so it is built first.
+      - run: pnpm build
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - if: steps.detect.outputs.manifests != '' && runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
-      - if: steps.detect.outputs.manifests != ''
-        uses: Swatinem/rust-cache@v2
-      - if: steps.detect.outputs.manifests != ''
-        shell: bash
+      - uses: Swatinem/rust-cache@v2
+      - shell: bash
         run: |
-          for manifest in ${{ steps.detect.outputs.manifests }}; do
+          for manifest in Cargo.toml $(git ls-files 'spikes/*/Cargo.toml'); do
             cargo fmt --manifest-path "$manifest" --all -- --check
             cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings
             cargo test --manifest-path "$manifest" --all
           done
+      - run: pnpm tauri build --debug --no-bundle
