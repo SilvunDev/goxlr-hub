@@ -18,8 +18,14 @@ https://github.com/user-attachments/assets/a97958d0-c720-4854-b838-77a2eee86ec4
 ## Status
 
 Early development. The app opens, shows its frame in English or French and
-lives in the system tray. It speaks the GoXLR protocol to a built-in virtual
-device, shown in demo mode; it does not talk to a real GoXLR yet.
+lives in the system tray. It connects to a full-size GoXLR, shows its identity
+and follows its faders live; it cannot change anything on the device yet.
+Without a GoXLR it shows a built-in virtual device, in demo mode.
+
+- **Windows**: the official TC-Helicon driver must be installed.
+- **Linux**: built and tested by CI, not tried on a real device yet.
+- GoXLR Utility and the official app must be closed: the GoXLR can only be
+  driven by one program at a time. GoXLR Hub tells you when one is running.
 
 ## Goals
 
@@ -56,8 +62,11 @@ pnpm tauri dev
 The Rust code lives in `crates/`, the interface (Svelte) in `ui/`:
 
 - `protocol`: the command language of the device, with no hardware access.
-- `device`: one device interface, and the virtual device behind it.
-- `core`: what the app knows about the device.
+- `transport`: carries commands to the device (official driver on Windows,
+  libusb on Linux).
+- `device`: one device interface, with the real or the virtual device behind
+  it.
+- `core`: what the app knows about the device, and which device it shows.
 - `app`: the desktop shell.
 
 ## Contributing
@@ -71,7 +80,8 @@ Logo, colours and typefaces are described in
 
 ## Credits
 
-Device protocol knowledge comes from
+Knowledge of the device protocol, and of how to reach the device on each
+system, comes from
 [GoXLR Utility](https://github.com/GoXLR-on-Linux/goxlr-utility) (MIT).
 
 ## License

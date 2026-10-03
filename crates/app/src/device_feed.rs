@@ -41,16 +41,18 @@ pub fn start(app: &AppHandle) -> Result<(), DeviceError> {
         .name("device-feed".into())
         .spawn(move || {
             let mut scanned: Option<Instant> = None;
+            let mut reported = station.connection().clone();
             loop {
                 if scanned.is_none_or(|at| at.elapsed() >= SCAN_INTERVAL) {
-                    let before = station.connection().clone();
                     station.scan();
                     scanned = Some(Instant::now());
-                    if *station.connection() != before {
-                        eprintln!("device connection: {:?}", station.connection());
-                    }
                 }
-                match station.poll() {
+                let polled = station.poll();
+                if *station.connection() != reported {
+                    reported = station.connection().clone();
+                    eprintln!("device connection: {reported:?}");
+                }
+                match polled {
                     Ok(snapshot) => {
                         if let Err(error) = app.emit(EVENT, &snapshot) {
                             eprintln!("could not send the device state to the window: {error}");
