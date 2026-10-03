@@ -9,7 +9,9 @@ mod hardware;
 mod session;
 mod virtual_device;
 
-use goxlr_hub_protocol::{Channel, Fader, MicType, OutputSet, ProtocolError, RoutingInput, Status};
+use goxlr_hub_protocol::{
+    ButtonLights, Channel, Fader, MicType, OutputSet, ProtocolError, RoutingInput, Status,
+};
 use thiserror::Error;
 
 pub use hardware::{HardwareLink, OpenError, open_hardware, rival};
@@ -60,6 +62,9 @@ pub trait Device: Send {
     fn set_volume(&mut self, channel: Channel, volume: u8) -> Result<(), DeviceError>;
 
     fn set_muted(&mut self, channel: Channel, muted: bool) -> Result<(), DeviceError>;
+
+    /// Lights every button at once.
+    fn set_button_lights(&mut self, lights: ButtonLights) -> Result<(), DeviceError>;
 
     fn set_routing(&mut self, input: RoutingInput, outputs: OutputSet) -> Result<(), DeviceError>;
 

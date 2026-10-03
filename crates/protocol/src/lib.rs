@@ -19,5 +19,6 @@ pub use response::{
     encode_mic_level, mic_level_db,
 };
 pub use types::{
-    Button, ButtonSet, Channel, Fader, MicType, OutputSet, RoutingInput, RoutingOutput, Side,
+    Button, ButtonLight, ButtonLights, ButtonSet, Channel, Fader, MicType, OutputSet, RoutingInput,
+    RoutingOutput, Side,
 };

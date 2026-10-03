@@ -5,8 +5,8 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use goxlr_hub_protocol::{
-    Button, ButtonSet, Channel, Fader, FirmwareInfo, MicType, OutputSet, Packet, Request,
-    RoutingInput, SerialInfo, Side, Status, Version, encode_mic_level,
+    Button, ButtonLights, ButtonSet, Channel, Fader, FirmwareInfo, MicType, OutputSet, Packet,
+    Request, RoutingInput, SerialInfo, Side, Status, Version, encode_mic_level,
 };
 
 use crate::{DeviceError, DeviceKind, Link, Session};
@@ -21,6 +21,7 @@ pub struct VirtualState {
     pub faders: [Channel; Fader::COUNT],
     pub volumes: [u8; Channel::COUNT],
     pub muted: [bool; Channel::COUNT],
+    pub lights: ButtonLights,
     /// Outputs of each input, in `RoutingInput::ALL` order, left then right.
     pub routing: [[OutputSet; 2]; RoutingInput::COUNT],
     pub mic_type: MicType,
@@ -37,6 +38,7 @@ impl Default for VirtualState {
             faders: [Channel::Mic, Channel::Chat, Channel::Music, Channel::System],
             volumes: [0; Channel::COUNT],
             muted: [false; Channel::COUNT],
+            lights: ButtonLights::default(),
             routing: [[OutputSet::default(); 2]; RoutingInput::COUNT],
             mic_type: MicType::Dynamic,
             mic_gain: 0,
@@ -93,6 +95,10 @@ impl VirtualState {
             }
             Request::SetMuted { channel, muted } => {
                 self.muted[usize::from(channel.index())] = muted;
+                Vec::new()
+            }
+            Request::SetButtonLights { lights } => {
+                self.lights = lights;
                 Vec::new()
             }
             Request::SetRouting {
@@ -219,7 +225,7 @@ pub fn open_virtual() -> Result<(Session<VirtualGoXlr>, VirtualHandle), DeviceEr
 
 #[cfg(test)]
 mod tests {
-    use goxlr_hub_protocol::{MIC_LEVEL_FLOOR_DB, RoutingOutput, mic_level_db};
+    use goxlr_hub_protocol::{ButtonLight, MIC_LEVEL_FLOOR_DB, RoutingOutput, mic_level_db};
 
     use super::*;
     use crate::Device;
@@ -247,8 +253,12 @@ mod tests {
             )
             .unwrap();
         device.set_mic_gain(MicType::Condenser, 30).unwrap();
+        let mut lights = ButtonLights::default();
+        lights.set(Button::Fader3Mute, ButtonLight::Lit);
+        device.set_button_lights(lights).unwrap();
 
         let state = hands.state();
+        assert_eq!(state.lights, lights);
         assert_eq!(state.faders[1], Channel::Game);
         assert_eq!(state.volumes[usize::from(Channel::Game.index())], 99);
         assert!(state.muted[usize::from(Channel::Music.index())]);
