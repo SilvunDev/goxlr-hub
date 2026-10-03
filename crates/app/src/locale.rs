@@ -55,7 +55,9 @@ mod tests {
 
     #[test]
     fn everything_else_falls_back_to_english() {
-        for tag in ["en", "en-GB", "de-DE", "", "  ", "french", "f", "frr-FR", "C"] {
+        for tag in [
+            "en", "en-GB", "de-DE", "", "  ", "french", "f", "frr-FR", "C",
+        ] {
             assert_eq!(Locale::from_tag(tag), Locale::En, "{tag:?}");
         }
     }
