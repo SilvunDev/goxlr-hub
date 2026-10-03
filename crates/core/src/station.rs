@@ -4,7 +4,7 @@
 use goxlr_hub_device::{Device, DeviceError, OpenError, open_virtual};
 use serde::Serialize;
 
-use crate::{Hub, Intent, MixerState, Snapshot};
+use crate::{Hub, Intent, Settings, Snapshot};
 
 /// Where real devices come from.
 pub trait Port: Send {
@@ -58,8 +58,9 @@ pub struct Station<P: Port> {
     demo: Hub,
     hardware: Option<Hub>,
     connection: Connection,
-    /// The mixer of a real device the app lost, to bring it back as it was.
-    remembered: Option<MixerState>,
+    /// The settings of a real device the app lost, to bring it back as it
+    /// was.
+    remembered: Option<Settings>,
 }
 
 impl<P: Port> Station<P> {
@@ -94,7 +95,7 @@ impl<P: Port> Station<P> {
             // the newcomer gets it.
             if let Some(program) = self.port.rival() {
                 if let Some(hub) = self.hardware.take() {
-                    self.remembered = Some(hub.mixer().clone());
+                    self.remembered = Some(hub.settings());
                 }
                 self.forget_volumes();
                 self.connection = Connection::Busy { program };
@@ -123,11 +124,12 @@ impl<P: Port> Station<P> {
         };
     }
 
-    /// The other program set the volumes as it pleased. The mutes and the
-    /// fader assignment are put back by the app, the volumes are not.
+    /// The other program set the volumes as it pleased. The mutes, the
+    /// fader assignment and the microphone are put back by the app, the
+    /// volumes are not.
     fn forget_volumes(&mut self) {
-        if let Some(mixer) = &mut self.remembered {
-            mixer.forget_volumes();
+        if let Some(settings) = &mut self.remembered {
+            settings.mixer.forget_volumes();
         }
     }
 
@@ -146,7 +148,7 @@ impl<P: Port> Station<P> {
     /// what the real one was set to.
     fn drop_hardware(&mut self) {
         if let Some(hub) = self.hardware.take() {
-            self.remembered = Some(hub.mixer().clone());
+            self.remembered = Some(hub.settings());
         }
         self.connection = Connection::Demo;
     }
@@ -178,12 +180,13 @@ mod tests {
 
     use goxlr_hub_device::{DeviceKind, Link, Session, VirtualGoXlr, VirtualHandle};
     use goxlr_hub_protocol::{
-        Button, ButtonLight, ButtonLights, Channel, Fader, OutputSet, Packet, Request,
-        RoutingInput, RoutingOutput, Side,
+        Button, ButtonLight, ButtonLights, Channel, EffectKey, EqBand, Fader, MicParamKey, MicType,
+        OutputSet, Packet, Request, RoutingInput, RoutingOutput, Side,
     };
     use serde_json::json;
 
     use super::*;
+    use crate::{CompressorSetting, GateSetting};
 
     /// What the test can do to a fake real device, and see of it.
     #[derive(Clone)]
@@ -211,6 +214,8 @@ mod tests {
                             | Request::SetButtonLights { .. }
                             | Request::SetRouting { .. }
                             | Request::SetMicGain { .. }
+                            | Request::SetEffect { .. }
+                            | Request::SetMicParam { .. }
                     )
                 })
                 .collect()
@@ -376,7 +381,106 @@ mod tests {
             side: Side::Right,
             outputs: OutputSet::of(&[RoutingOutput::BroadcastMix, RoutingOutput::ChatMic]),
         }));
-        assert_eq!(settings.len(), 4 + 11 + 1 + 16 + 1);
+        // The microphone processing is sent, by both ways for the gate and
+        // the compressor. Nobody said how the microphone is plugged in: its
+        // type and gain are left as they are.
+        let effects = settings
+            .iter()
+            .filter(|request| matches!(request, Request::SetEffect { .. }))
+            .count();
+        let params = settings
+            .iter()
+            .filter(|request| matches!(request, Request::SetMicParam { .. }))
+            .count();
+        assert_eq!((effects, params), (33, 9));
+        assert!(
+            !settings
+                .iter()
+                .any(|request| matches!(request, Request::SetMicGain { .. }))
+        );
+        assert_eq!(settings.len(), 4 + 11 + 1 + 16 + 1 + 33 + 9);
+    }
+
+    #[test]
+    fn the_microphone_comes_back_with_a_device_plugged_again() {
+        let (first, before) = real_device();
+        let (second, after) = real_device();
+        let (mut station, _) = station([Ok(first), Err(OpenError::Absent), Ok(second)]);
+        station.scan();
+        for intent in [
+            Intent::SetMicType {
+                mic_type: MicType::Condenser,
+            },
+            Intent::SetMicGain { gain: 44 },
+            Intent::SetGate {
+                setting: GateSetting::Threshold,
+                value: -50,
+            },
+            Intent::SetCompressor {
+                setting: CompressorSetting::MakeupGain,
+                value: 6,
+            },
+            Intent::SetEqBand {
+                band: EqBand::Khz8,
+                frequency: 9000.0,
+                gain: -5,
+            },
+            Intent::SetDeEsser { amount: 70 },
+        ] {
+            station.apply(intent).unwrap();
+        }
+        let shown = station.poll().unwrap().mic;
+        assert_eq!(shown.gain, Some(44));
+
+        // Pulled while a setting is on its way: no crash, the demo mode.
+        before.unplugged.store(true, Ordering::Relaxed);
+        station.apply(Intent::SetDeEsser { amount: 10 }).unwrap();
+        assert_eq!(station.connection(), &Connection::Demo);
+        let demo = station.poll().unwrap();
+        assert_eq!(demo.device.kind, "virtual");
+        assert_eq!(demo.mic.de_esser, 0);
+
+        station.scan();
+        station.scan();
+        assert_eq!(station.connection(), &Connection::Hardware);
+        let device = after.hands.state();
+        assert_eq!((device.mic_type, device.mic_gain), (MicType::Condenser, 44));
+        assert_eq!(device.effects[&EffectKey::GateThreshold], -50);
+        assert_eq!(device.mic_params[&MicParamKey::CompressorMakeupGain], 6.0);
+        assert_eq!(device.effects[&EffectKey::EqFrequency(EqBand::Khz8)], 212);
+        assert_eq!(device.effects[&EffectKey::EqGain(EqBand::Khz8)], -5);
+        assert_eq!(device.effects[&EffectKey::DeEsser], 70);
+        assert_eq!(station.poll().unwrap().mic, shown);
+        assert_eq!(
+            after.settings_received().last(),
+            Some(&Request::SetButtonLights {
+                lights: ButtonLights::default()
+            })
+        );
+    }
+
+    #[test]
+    fn the_microphone_comes_back_after_a_rival_program() {
+        let (first, _) = real_device();
+        let (second, after) = real_device();
+        let (mut station, rival) = station([Ok(first), Ok(second)]);
+        station.scan();
+        station
+            .apply(Intent::SetMicType {
+                mic_type: MicType::Dynamic,
+            })
+            .unwrap();
+        station.apply(Intent::SetMicGain { gain: 55 }).unwrap();
+        station.apply(Intent::SetDeEsser { amount: 33 }).unwrap();
+
+        *rival.lock().unwrap() = Some("GoXLR Utility".into());
+        station.scan();
+        *rival.lock().unwrap() = None;
+        station.scan();
+        assert_eq!(station.connection(), &Connection::Hardware);
+        let device = after.hands.state();
+        assert_eq!((device.mic_type, device.mic_gain), (MicType::Dynamic, 55));
+        assert_eq!(device.effects[&EffectKey::DeEsser], 33);
     }
 
     fn routed(bench: &Bench, input: RoutingInput) -> OutputSet {
