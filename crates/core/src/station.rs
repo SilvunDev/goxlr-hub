@@ -4,7 +4,7 @@
 use goxlr_hub_device::{Device, DeviceError, OpenError, open_virtual};
 use serde::Serialize;
 
-use crate::{Hub, MixerState, Snapshot};
+use crate::{Hub, Intent, MixerState, Snapshot};
 
 /// Where real devices come from.
 pub trait Port: Send {
@@ -58,7 +58,7 @@ pub struct Station<P: Port> {
     demo: Hub,
     hardware: Option<Hub>,
     connection: Connection,
-    /// The mixer of a real device that dropped, to bring it back as it was.
+    /// The mixer of a real device the app lost, to bring it back as it was.
     remembered: Option<MixerState>,
 }
 
@@ -86,8 +86,10 @@ impl<P: Port> Station<P> {
             // Two programs driving the device steal each other's answers:
             // the newcomer gets it.
             if let Some(program) = self.port.rival() {
-                self.hardware = None;
-                self.remembered = None;
+                if let Some(hub) = self.hardware.take() {
+                    self.remembered = Some(hub.mixer().clone());
+                }
+                self.forget_volumes();
                 self.connection = Connection::Busy { program };
             }
             return;
@@ -106,13 +108,40 @@ impl<P: Port> Station<P> {
             },
             Err(OpenError::Absent) => Connection::Demo,
             Err(OpenError::Busy { program }) => {
-                // The other program changed the device as it pleased.
-                self.remembered = None;
+                self.forget_volumes();
                 Connection::Busy { program }
             }
             Err(OpenError::Unsupported) => Connection::Unsupported,
             Err(OpenError::Failed(reason)) => Connection::Unreachable { reason },
         };
+    }
+
+    /// The other program set the volumes as it pleased. The mutes and the
+    /// fader assignment are put back by the app, the volumes are not.
+    fn forget_volumes(&mut self) {
+        if let Some(mixer) = &mut self.remembered {
+            mixer.forget_volumes();
+        }
+    }
+
+    /// Does what the interface asked, on the device shown.
+    pub fn apply(&mut self, intent: Intent) -> Result<(), DeviceError> {
+        if let Some(hub) = &mut self.hardware {
+            if hub.apply(intent).is_err() {
+                self.drop_hardware();
+            }
+            return Ok(());
+        }
+        self.demo.apply(intent)
+    }
+
+    /// The real device stopped answering: back to the virtual one, keeping
+    /// what the real one was set to.
+    fn drop_hardware(&mut self) {
+        if let Some(hub) = self.hardware.take() {
+            self.remembered = Some(hub.mixer().clone());
+        }
+        self.connection = Connection::Demo;
     }
 
     /// The picture to draw: the real device, or the virtual one when the
@@ -121,11 +150,7 @@ impl<P: Port> Station<P> {
         if let Some(hub) = &mut self.hardware {
             match hub.poll() {
                 Ok(snapshot) => return Ok(self.stamp(snapshot)),
-                Err(_) => {
-                    self.remembered = Some(hub.mixer().clone());
-                    self.hardware = None;
-                    self.connection = Connection::Demo;
-                }
+                Err(_) => self.drop_hardware(),
             }
         }
         let snapshot = self.demo.poll()?;
@@ -145,7 +170,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use goxlr_hub_device::{DeviceKind, Link, Session, VirtualGoXlr, VirtualHandle};
-    use goxlr_hub_protocol::{Channel, Fader, Packet, Request};
+    use goxlr_hub_protocol::{Button, ButtonLight, ButtonLights, Channel, Fader, Packet, Request};
     use serde_json::json;
 
     use super::*;
@@ -172,9 +197,30 @@ mod tests {
                         Request::SetFader { .. }
                             | Request::SetVolume { .. }
                             | Request::SetMuted { .. }
+                            | Request::SetButtonLights { .. }
                             | Request::SetRouting { .. }
                             | Request::SetMicGain { .. }
                     )
+                })
+                .collect()
+        }
+
+        fn volumes_received(&self) -> Vec<(Channel, u8)> {
+            self.settings_received()
+                .into_iter()
+                .filter_map(|request| match request {
+                    Request::SetVolume { channel, volume } => Some((channel, volume)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn mutes_received(&self) -> Vec<(Channel, bool)> {
+            self.settings_received()
+                .into_iter()
+                .filter_map(|request| match request {
+                    Request::SetMuted { channel, muted } => Some((channel, muted)),
+                    _ => None,
                 })
                 .collect()
         }
@@ -269,13 +315,15 @@ mod tests {
     }
 
     #[test]
-    fn taking_a_real_device_over_only_assigns_its_faders() {
+    fn taking_a_real_device_over_sends_what_it_cannot_tell_and_no_volume() {
         let (device, bench) = real_device();
         let (mut station, _) = station([Ok(device)]);
         station.scan();
         station.poll().unwrap();
+
+        let settings = bench.settings_received();
         assert_eq!(
-            bench.settings_received(),
+            settings[..4],
             [
                 (Fader::A, Channel::Mic),
                 (Fader::B, Channel::Chat),
@@ -284,6 +332,57 @@ mod tests {
             ]
             .map(|(fader, channel)| Request::SetFader { fader, channel })
         );
+        assert_eq!(
+            bench.mutes_received(),
+            Channel::ALL.map(|channel| (channel, false))
+        );
+        assert_eq!(
+            settings.last(),
+            Some(&Request::SetButtonLights {
+                lights: ButtonLights::default()
+            })
+        );
+        assert_eq!(bench.volumes_received(), []);
+        assert_eq!(settings.len(), 4 + 11 + 1);
+    }
+
+    #[test]
+    fn what_the_screen_asks_goes_to_the_real_device_when_it_is_shown() {
+        let (device, bench) = real_device();
+        let (mut station, _) = station([Ok(device)]);
+        let intent = Intent::SetVolume {
+            channel: Channel::Headphones,
+            volume: 60,
+        };
+
+        // Before the device is taken, the virtual one answers.
+        station.apply(intent).unwrap();
+        assert_eq!(bench.volumes_received(), []);
+        assert_eq!(station.poll().unwrap().channels[8].volume, Some(60));
+
+        station.scan();
+        assert_eq!(station.poll().unwrap().channels[8].volume, None);
+        station.apply(intent).unwrap();
+        assert_eq!(bench.volumes_received(), [(Channel::Headphones, 60)]);
+        assert_eq!(station.poll().unwrap().channels[8].volume, Some(60));
+    }
+
+    #[test]
+    fn an_intent_for_a_device_that_just_dropped_brings_the_demo_mode_back() {
+        let (device, bench) = real_device();
+        let (mut station, _) = station([Ok(device)]);
+        station.scan();
+        station.poll().unwrap();
+
+        bench.unplugged.store(true, Ordering::Relaxed);
+        station
+            .apply(Intent::SetMuted {
+                channel: Channel::Mic,
+                muted: true,
+            })
+            .unwrap();
+        assert_eq!(station.connection(), &Connection::Demo);
+        assert_eq!(station.poll().unwrap().device.kind, "virtual");
     }
 
     #[test]
@@ -317,13 +416,30 @@ mod tests {
     }
 
     #[test]
-    fn a_device_plugged_again_gets_its_fader_volumes_back_and_nothing_else() {
+    fn a_device_plugged_again_gets_back_all_the_app_knew() {
         let (first, before) = real_device();
         let (second, after) = real_device();
         let (mut station, _) = station([Ok(first), Err(OpenError::Absent), Ok(second)]);
         station.scan();
         before.hands.move_fader(Fader::A, 111);
         before.hands.move_fader(Fader::D, 222);
+        station.poll().unwrap();
+        for intent in [
+            Intent::SetMuted {
+                channel: Channel::Chat,
+                muted: true,
+            },
+            Intent::SetVolume {
+                channel: Channel::Headphones,
+                volume: 60,
+            },
+            Intent::AssignFader {
+                fader: Fader::C,
+                channel: Channel::Game,
+            },
+        ] {
+            station.apply(intent).unwrap();
+        }
         station.poll().unwrap();
 
         before.unplugged.store(true, Ordering::Relaxed);
@@ -332,20 +448,26 @@ mod tests {
         station.scan();
         assert_eq!(station.connection(), &Connection::Hardware);
 
-        let settings = after.settings_received();
-        assert_eq!(settings.len(), 8, "four assignments, four volumes");
-        assert!(settings.contains(&Request::SetVolume {
-            channel: Channel::Mic,
-            volume: 111
-        }));
-        assert!(settings.contains(&Request::SetVolume {
-            channel: Channel::System,
-            volume: 222
-        }));
+        let device = after.hands.state();
+        assert_eq!(
+            device.faders,
+            [Channel::Mic, Channel::Chat, Channel::Game, Channel::System]
+        );
+        assert!(device.muted[usize::from(Channel::Chat.index())]);
+        assert_eq!(device.lights.get(Button::Fader2Mute), ButtonLight::Lit);
+        let volumes = after.volumes_received();
+        for known in [
+            (Channel::Mic, 111),
+            (Channel::System, 222),
+            (Channel::Headphones, 60),
+        ] {
+            assert!(volumes.contains(&known), "{known:?} in {volumes:?}");
+        }
+        // Line In was never set nor shown by a fader: left alone.
         assert!(
-            !settings
+            !volumes
                 .iter()
-                .any(|request| matches!(request, Request::SetMuted { .. }))
+                .any(|(channel, _)| *channel == Channel::LineIn)
         );
     }
 
@@ -370,6 +492,12 @@ mod tests {
         let (mut station, rival) = station([Ok(first), Ok(second)]);
         station.scan();
         station.poll().unwrap();
+        station
+            .apply(Intent::SetMuted {
+                channel: Channel::Music,
+                muted: true,
+            })
+            .unwrap();
 
         *rival.lock().unwrap() = Some("GoXLR Utility".into());
         station.scan();
@@ -381,11 +509,13 @@ mod tests {
         );
         assert_eq!(station.poll().unwrap().device.kind, "virtual");
 
-        // Once the rival is gone the device comes back, as the rival left it.
+        // Once the rival is gone the device comes back with the mutes of the
+        // app, and the volumes the rival left.
         *rival.lock().unwrap() = None;
         station.scan();
         assert_eq!(station.connection(), &Connection::Hardware);
-        assert_eq!(after.settings_received().len(), 4, "assignments only");
+        assert!(after.mutes_received().contains(&(Channel::Music, true)));
+        assert_eq!(after.volumes_received(), []);
     }
 
     #[test]
