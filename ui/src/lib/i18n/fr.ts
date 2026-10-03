@@ -62,6 +62,8 @@ export const fr: Messages = {
     hint: 'Cochez où va chaque source. La GoXLR suit tout de suite.',
     source: 'Source',
     route: '{input} vers {output}',
+    monitorHint:
+      'Vous entendez votre micro dans le casque seulement si le volume Retour micro est monté. Réglez-le dans Pistes audio.',
     loopHint: 'Un tiret marque une route qui renverrait un son là d’où il vient.',
     inputs: {
       mic: 'Micro',

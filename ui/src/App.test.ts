@@ -466,6 +466,29 @@ describe('App', () => {
       expect(cell('Chat to Chat Mic').getAttribute('aria-checked')).toBe('false');
     });
 
+    it('says why the microphone may not be heard in the headphones', async () => {
+      const state = (volume: number | null, outputs: string[]) => {
+        const state = snapshot();
+        state.routing[0].outputs = outputs as never;
+        state.channels.push({ channel: 'micMonitor', volume, muted: false, fader: null });
+        return state;
+      };
+      await open(state(null, ['headphones']));
+      expect(screen.getByText(/Mic Monitor volume/)).toBeTruthy();
+      await report(state(0, ['headphones']));
+      expect(screen.getByText(/Mic Monitor volume/)).toBeTruthy();
+
+      await report(state(200, ['headphones']));
+      expect(screen.queryByText(/Mic Monitor volume/)).toBeNull();
+      await report(state(null, ['chatMic']));
+      expect(screen.queryByText(/Mic Monitor volume/)).toBeNull();
+      // A device that does not list the channel: nothing to say.
+      const bare = snapshot();
+      bare.routing[0].outputs = ['headphones'];
+      await report(bare);
+      expect(screen.queryByText(/Mic Monitor volume/)).toBeNull();
+    });
+
     it('waits for the device, and for a device that tells its routing', async () => {
       render(App);
       await fireEvent.click(screen.getByRole('button', { name: 'Routing' }));

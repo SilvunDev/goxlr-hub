@@ -61,6 +61,8 @@ export const en = {
     hint: 'Tick where each source is sent. The GoXLR follows at once.',
     source: 'Source',
     route: '{input} to {output}',
+    monitorHint:
+      'You hear your microphone in the headphones only when the Mic Monitor volume is up. Set it in Channels.',
     loopHint: 'A dash marks a route that would send a sound back to where it comes from.',
     inputs: {
       mic: 'Mic',

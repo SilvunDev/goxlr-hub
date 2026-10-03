@@ -13,6 +13,13 @@
 
   let rows = $derived(Array.isArray(device?.routing) ? device.routing : null);
 
+  // The microphone reaches the headphones through the volume of its monitor.
+  let monitorDown = $derived.by(() => {
+    const routed = rows?.find((row) => row.input === 'mic')?.outputs.includes('headphones');
+    const monitor = device?.channels.find((view) => view.channel === 'micMonitor');
+    return routed === true && monitor !== undefined && !monitor.volume;
+  });
+
   function label(row: RouteView, output: RoutingOutputId): string {
     return i18n.t.routing.route
       .replace('{input}', i18n.t.routing.inputs[row.input])
@@ -68,6 +75,9 @@
         {/each}
       </tbody>
     </table>
+    {#if monitorDown}
+      <p class="hint" role="note">{i18n.t.routing.monitorHint}</p>
+    {/if}
     <p class="hint">{i18n.t.routing.loopHint}</p>
     <dl>
       {#each ROUTING_OUTPUTS as output (output)}
