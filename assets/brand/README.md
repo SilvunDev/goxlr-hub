@@ -15,6 +15,7 @@ font.
 | [`mark.svg`](mark.svg) | App icon, favicon, avatar. |
 | [`logo-dark.svg`](logo-dark.svg) | Mark and wordmark, for dark backgrounds. |
 | [`logo-light.svg`](logo-light.svg) | Mark and wordmark, for light backgrounds. |
+| [`social-preview.png`](social-preview.png) | Repository social preview, 1280 × 640, a still from the teaser video. |
 
 Rules:
 

@@ -13,6 +13,8 @@ An open source control app for the TC-Helicon GoXLR, built around plugins.
 > supported by TC-Helicon. "GoXLR" is a trademark of its owner and is used
 > here only to describe the hardware this software works with.
 
+https://github.com/user-attachments/assets/c5cfef23-aada-4469-9b5f-96104ea7d0e5
+
 ## Status
 
 Early development. Nothing is usable yet.
