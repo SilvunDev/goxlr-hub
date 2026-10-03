@@ -2,20 +2,45 @@ import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
-import type { ChannelId, FaderId, MicView, Snapshot } from './lib/device';
+import type { ChannelId, FaderId, MicView, ProfilesView, Snapshot } from './lib/device';
 import { i18n } from './lib/i18n/index.svelte';
 
 // Stands in for the Rust side: `feed.push` plays the device reporting its state.
 // `feed.sent` collects what the interface asks of the device.
+// `feed.commands` collects what it asks of the profiles, answered by
+// `feed.refusal`. `feed.askToQuit` plays the tray menu asking to quit.
 const feed = vi.hoisted(() => ({
   push: (_snapshot: unknown) => {},
   sent: [] as unknown[],
+  commands: [] as unknown[],
+  refusal: null as string | null,
+  startup: null as { enabled: boolean; hidden: boolean } | null,
+  startupFails: false,
+  askToQuit: () => {},
+  quits: 0,
 }));
 
 vi.mock('./lib/backend', () => ({
   syncLocale: async () => {},
   sendIntent: (intent: unknown) => {
     feed.sent.push(intent);
+  },
+  runProfileCommand: async (command: unknown) => {
+    feed.commands.push(command);
+    return feed.refusal;
+  },
+  getStartup: async () => feed.startup,
+  setStartup: async (startup: { enabled: boolean; hidden: boolean }) => {
+    if (feed.startupFails) return null;
+    feed.startup = startup;
+    return startup;
+  },
+  onQuitRequested: (handler: () => void) => {
+    feed.askToQuit = handler;
+    return () => {};
+  },
+  quit: async () => {
+    feed.quits += 1;
   },
   onDeviceState: (handler: (snapshot: unknown) => void) => {
     feed.push = handler;
@@ -49,6 +74,18 @@ function mic(overrides: Partial<MicView> = {}): MicView {
       band('khz16', 16000, 8000, 18000),
     ],
     deEsser: 0,
+    ...overrides,
+  };
+}
+
+function profiles(overrides: Partial<ProfilesView> = {}): ProfilesView {
+  return {
+    active: { profile: 'Stream', mix: 'Desk', mic: 'Radio' },
+    profiles: ['Game', 'Stream'],
+    mixes: ['Desk', 'Quiet'],
+    mics: ['Headset', 'Radio'],
+    dirty: { profile: false, mix: false, mic: false },
+    unsaved: false,
     ...overrides,
   };
 }
@@ -105,6 +142,11 @@ describe('App', () => {
   beforeEach(() => {
     i18n.setLocale('en');
     feed.sent.length = 0;
+    feed.commands.length = 0;
+    feed.refusal = null;
+    feed.startup = null;
+    feed.startupFails = false;
+    feed.quits = 0;
   });
 
   it('lists every section in order, then settings', () => {
@@ -235,6 +277,32 @@ describe('App', () => {
       expect(screen.getByText('-72.2 dB')).toBeTruthy();
       await report(snapshot({ micLevelDb: 12 }));
       expect(screen.getByText('0.0 dB')).toBeTruthy();
+    });
+
+    it('lights the sampler pads that are held on the device, and only shows them', async () => {
+      render(App);
+      await report(snapshot());
+      const pads = within(screen.getByRole('region', { name: 'Sampler pads' }));
+      expect(pads.getAllByRole('listitem').map((pad) => pad.getAttribute('aria-label'))).toEqual([
+        'Bank A, released',
+        'Bank B, released',
+        'Bank C, released',
+        'Top left, released',
+        'Top right, released',
+        'Bottom left, released',
+        'Bottom right, released',
+        'Clear, released',
+      ]);
+      expect(pads.queryByRole('button')).toBeNull();
+
+      await report(snapshot({ pressed: ['samplerTopRight', 'samplerSelectB', 'fader1Mute'] }));
+      expect(pads.getByLabelText('Top right, pressed')).toBeTruthy();
+      expect(pads.getByLabelText('Bank B, pressed')).toBeTruthy();
+      expect(pads.getByLabelText('Top left, released')).toBeTruthy();
+
+      // A device that tells no button shows no pad held, and does not break.
+      await report({ ...snapshot(), pressed: undefined });
+      expect(pads.getByLabelText('Top right, released')).toBeTruthy();
     });
 
     it('names the device', async () => {
@@ -651,6 +719,24 @@ describe('App', () => {
       expect(slider('Compressor: Ratio').getAttribute('aria-valuetext')).toBe('2.5:1');
     });
 
+    it('puts each part of the processing back to neutral, or all of them', async () => {
+      await open();
+      for (const group of ['Noise gate', 'Compressor', 'Equaliser', 'De-esser']) {
+        await fireEvent.click(screen.getByRole('button', { name: `Reset to neutral: ${group}` }));
+      }
+      await fireEvent.click(
+        screen.getByRole('button', { name: 'Reset all the processing to neutral' }),
+      );
+      expect(feed.sent).toEqual(
+        ['gate', 'compressor', 'equalizer', 'deEsser', 'all'].map((block) => ({
+          type: 'resetMic',
+          block,
+        })),
+      );
+      // The type and the gain are no processing: nothing resets them.
+      expect(screen.queryByRole('button', { name: 'Reset to neutral: Input' })).toBeNull();
+    });
+
     it('sets the de-esser', async () => {
       await open(snapshot({ mic: mic({ deEsser: 20 }) }));
       expect(slider('De-esser: Amount').value).toBe('20');
@@ -742,6 +828,329 @@ describe('App', () => {
       expect(
         screen.getByRole('slider', { name: 'Bande 1 de l’égaliseur' }).getAttribute('aria-valuetext'),
       ).toBe('31,5 Hz, 0 dB');
+    });
+  });
+
+  describe('with profiles', () => {
+    const unsaved = () =>
+      profiles({ dirty: { profile: false, mix: false, mic: true }, unsaved: true });
+    const card = (name: string) => within(screen.getByRole('region', { name }));
+    const banner = () => screen.queryByRole('region', { name: 'Unsaved changes' });
+
+    async function open(view: ProfilesView = profiles()) {
+      render(App);
+      await report(snapshot({ profiles: view }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Manage profiles' }));
+    }
+    async function type(name: string) {
+      await fireEvent.input(screen.getByRole('textbox', { name: 'Name' }), {
+        target: { value: name },
+      });
+    }
+
+    it('names the profile in use at the top of every section', async () => {
+      render(App);
+      expect(screen.getByRole('banner').textContent).toContain('No profile yet');
+      await report(snapshot({ profiles: profiles() }));
+      expect(screen.getByRole('banner').textContent).toContain('Stream');
+      await fireEvent.click(screen.getByRole('button', { name: 'Routing' }));
+      expect(screen.getByRole('banner').textContent).toContain('Stream');
+    });
+
+    it('says nothing of unsaved changes when there are none', async () => {
+      render(App);
+      await report(snapshot({ profiles: profiles() }));
+      expect(banner()).toBeNull();
+    });
+
+    it('shows a banner while something is not saved, and saves from it', async () => {
+      render(App);
+      await report(snapshot({ profiles: unsaved() }));
+      expect(banner()?.textContent).toContain('Unsaved changes');
+      await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+      expect(banner()).toBeTruthy();
+
+      await fireEvent.click(within(banner()!).getByRole('button', { name: 'Save' }));
+      expect(feed.commands).toEqual([{ type: 'save', kind: 'profile' }]);
+      // The banner goes when the device says so, not when the button is clicked.
+      expect(banner()).toBeTruthy();
+      await report(snapshot({ profiles: profiles() }));
+      expect(banner()).toBeNull();
+    });
+
+    it('says why saving from the banner did not work', async () => {
+      feed.refusal = 'storage';
+      render(App);
+      await report(snapshot({ profiles: unsaved() }));
+      await fireEvent.click(within(banner()!).getByRole('button', { name: 'Save' }));
+      await tick();
+      expect(screen.getByRole('alert').textContent).toBe('Could not write to the disk.');
+    });
+
+    it('lists the profiles and the pieces, with what is in use', async () => {
+      await open();
+      expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Profiles');
+      expect(
+        screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
+      ).toEqual(['Profiles', 'Mixes', 'Microphones']);
+
+      const names = (region: string) =>
+        card(region)
+          .getAllByRole('radio')
+          .map((radio) => [radio.textContent?.trim(), radio.getAttribute('aria-checked')]);
+      expect(names('Profiles')).toEqual([
+        ['Game', 'false'],
+        ['Stream In use', 'true'],
+      ]);
+      expect(names('Mixes')).toEqual([
+        ['Desk In use', 'true'],
+        ['Quiet', 'false'],
+      ]);
+      expect(names('Microphones')).toEqual([
+        ['Headset', 'false'],
+        ['Radio In use', 'true'],
+      ]);
+      expect(screen.getByText(/Controls and lighting/)).toBeTruthy();
+    });
+
+    it('switches to another profile or to another piece', async () => {
+      await open();
+      await fireEvent.click(card('Profiles').getByRole('radio', { name: /Game/ }));
+      await fireEvent.click(card('Microphones').getByRole('radio', { name: /Headset/ }));
+      // The one in use is not loaded again.
+      await fireEvent.click(card('Mixes').getByRole('radio', { name: /Desk/ }));
+      expect(feed.commands).toEqual([
+        { type: 'select', kind: 'profile', name: 'Game' },
+        { type: 'select', kind: 'mic', name: 'Headset' },
+      ]);
+    });
+
+    it('asks before a switch that would lose unsaved changes', async () => {
+      await open(unsaved());
+      expect(card('Microphones').getByRole('radio', { name: /Radio/ }).textContent).toContain(
+        'Not saved',
+      );
+
+      // Another mix leaves the microphone alone: nothing to lose.
+      await fireEvent.click(card('Mixes').getByRole('radio', { name: /Quiet/ }));
+      expect(feed.commands).toEqual([{ type: 'select', kind: 'mix', name: 'Quiet' }]);
+
+      await fireEvent.click(card('Microphones').getByRole('radio', { name: /Headset/ }));
+      expect(feed.commands).toHaveLength(1);
+      expect(screen.getByText(/Switch to “Headset”\?/)).toBeTruthy();
+      await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByText(/Switch to/)).toBeNull();
+      expect(feed.commands).toHaveLength(1);
+
+      await fireEvent.click(card('Profiles').getByRole('radio', { name: /Game/ }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Switch anyway' }));
+      expect(feed.commands[1]).toEqual({ type: 'select', kind: 'profile', name: 'Game' });
+    });
+
+    it('saves a piece alone, only when it changed', async () => {
+      await open(unsaved());
+      const save = (region: string) =>
+        card(region).getByRole('button', { name: 'Save' }) as HTMLButtonElement;
+      expect(save('Mixes').disabled).toBe(true);
+      expect(save('Microphones').disabled).toBe(false);
+      // A profile is saved with its pieces.
+      expect(save('Profiles').disabled).toBe(false);
+
+      await fireEvent.click(save('Microphones'));
+      expect(feed.commands).toEqual([{ type: 'save', kind: 'mic' }]);
+    });
+
+    it('saves under a new name typed on the screen', async () => {
+      await open();
+      await fireEvent.click(card('Profiles').getByRole('button', { name: 'Save as…' }));
+      await type('Late night');
+      await fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+      expect(feed.commands).toEqual([{ type: 'saveAs', kind: 'profile', name: 'Late night' }]);
+      await tick();
+      expect(screen.queryByRole('textbox')).toBeNull();
+    });
+
+    it('renames and duplicates, starting from the name it has', async () => {
+      await open();
+      await fireEvent.click(screen.getByRole('button', { name: 'Rename Quiet' }));
+      const field = screen.getByRole('textbox', { name: 'Name' }) as HTMLInputElement;
+      expect(field.value).toBe('Quiet');
+      await type('Night');
+      await fireEvent.submit(field.form!);
+
+      await tick();
+      await fireEvent.click(screen.getByRole('button', { name: 'Duplicate Radio' }));
+      await type('Radio 2');
+      await fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+      expect(feed.commands).toEqual([
+        { type: 'rename', kind: 'mix', name: 'Quiet', to: 'Night' },
+        { type: 'duplicate', kind: 'mic', name: 'Radio', to: 'Radio 2' },
+      ]);
+    });
+
+    it('deletes only after a yes, and never what is in use', async () => {
+      await open();
+      const remove = (name: string) =>
+        screen.getByRole('button', { name: `Delete ${name}` }) as HTMLButtonElement;
+      expect(remove('Stream').disabled).toBe(true);
+      expect(remove('Desk').disabled).toBe(true);
+
+      await fireEvent.click(remove('Game'));
+      expect(screen.getByText('Delete “Game”? This cannot be undone.')).toBeTruthy();
+      expect(feed.commands).toEqual([]);
+      await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(feed.commands).toEqual([]);
+
+      await fireEvent.click(remove('Game'));
+      await fireEvent.click(card('Profiles').getByRole('button', { name: 'Delete' }));
+      expect(feed.commands).toEqual([{ type: 'delete', kind: 'profile', name: 'Game' }]);
+    });
+
+    it('says in plain words why something was refused, and keeps the name typed', async () => {
+      await open();
+      for (const [refusal, said] of [
+        ['nameTaken', 'This name is already taken.'],
+        ['invalidName', /This name cannot be used/],
+        ['inUse', /It is in use/],
+        ['unreadable', 'Its file cannot be read.'],
+      ] as const) {
+        feed.refusal = refusal;
+        await fireEvent.click(card('Mixes').getByRole('button', { name: 'Save as…' }));
+        await type('Desk');
+        await fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+        await tick();
+        expect(card('Mixes').getByRole('alert').textContent).toMatch(said);
+        expect((screen.getByRole('textbox', { name: 'Name' }) as HTMLInputElement).value).toBe(
+          'Desk',
+        );
+        await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        expect(screen.queryByRole('alert')).toBeNull();
+      }
+    });
+
+    it('waits for a device that tells its profiles', async () => {
+      render(App);
+      await fireEvent.click(screen.getByRole('button', { name: 'Manage profiles' }));
+      expect(screen.getByText('Connecting…')).toBeTruthy();
+      await report(snapshot());
+      expect(screen.getByText('Connecting…')).toBeTruthy();
+      await report(snapshot({ profiles: { active: {} } as unknown as ProfilesView }));
+      expect(screen.getByText('Connecting…')).toBeTruthy();
+    });
+
+    it('speaks French too', async () => {
+      await open(unsaved());
+      i18n.setLocale('fr');
+      await tick();
+      expect(screen.getByRole('region', { name: 'Modifications non enregistrées' })).toBeTruthy();
+      expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Profils');
+      expect(card('Micros').getByRole('radio', { name: /Radio/ }).textContent).toContain(
+        'Non enregistré',
+      );
+      expect(screen.getByRole('button', { name: 'Renommer Quiet' })).toBeTruthy();
+    });
+  });
+
+  describe('when asked to quit with unsaved changes', () => {
+    async function ask() {
+      render(App);
+      await report(
+        snapshot({
+          profiles: profiles({ dirty: { profile: false, mix: true, mic: false }, unsaved: true }),
+        }),
+      );
+      feed.askToQuit();
+      await tick();
+      return within(screen.getByRole('alertdialog', { name: 'Quit without saving?' }));
+    }
+
+    it('asks nothing until then', async () => {
+      render(App);
+      await report(snapshot({ profiles: profiles() }));
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+    });
+
+    it('saves and quits', async () => {
+      const dialog = await ask();
+      await fireEvent.click(dialog.getByRole('button', { name: 'Save and quit' }));
+      await tick();
+      expect(feed.commands).toEqual([{ type: 'save', kind: 'profile' }]);
+      expect(feed.quits).toBe(1);
+    });
+
+    it('stays open and says why when saving did not work', async () => {
+      feed.refusal = 'storage';
+      const dialog = await ask();
+      await fireEvent.click(dialog.getByRole('button', { name: 'Save and quit' }));
+      await tick();
+      expect(feed.quits).toBe(0);
+      expect(dialog.getByRole('alert').textContent).toBe('Could not write to the disk.');
+    });
+
+    it('quits without saving', async () => {
+      const dialog = await ask();
+      await fireEvent.click(dialog.getByRole('button', { name: 'Quit without saving' }));
+      expect(feed.commands).toEqual([]);
+      expect(feed.quits).toBe(1);
+    });
+
+    it('goes back to the app on cancel or Escape', async () => {
+      const dialog = await ask();
+      await fireEvent.click(dialog.getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+
+      feed.askToQuit();
+      await tick();
+      await fireEvent.keyDown(window, { key: 'Escape' });
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+      expect(feed.quits).toBe(0);
+    });
+  });
+
+  describe('on the startup setting', () => {
+    const box = (name: RegExp) => screen.getByRole('checkbox', { name }) as HTMLInputElement;
+    async function open() {
+      render(App);
+      await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+      await tick();
+    }
+
+    it('is not shown when the system cannot tell', async () => {
+      await open();
+      expect(screen.queryByRole('checkbox')).toBeNull();
+    });
+
+    it('shows how the app starts, hidden by default', async () => {
+      feed.startup = { enabled: false, hidden: true };
+      await open();
+      expect(box(/with the computer/).checked).toBe(false);
+      expect(box(/stay hidden/).checked).toBe(true);
+      expect(box(/stay hidden/).disabled).toBe(true);
+    });
+
+    it('starts the app with the computer, hidden or not', async () => {
+      feed.startup = { enabled: false, hidden: true };
+      await open();
+      await fireEvent.click(box(/with the computer/));
+      await tick();
+      expect(feed.startup).toEqual({ enabled: true, hidden: true });
+      expect(box(/with the computer/).checked).toBe(true);
+      expect(box(/stay hidden/).disabled).toBe(false);
+
+      await fireEvent.click(box(/stay hidden/));
+      await tick();
+      expect(feed.startup).toEqual({ enabled: true, hidden: false });
+      expect(box(/stay hidden/).checked).toBe(false);
+    });
+
+    it('keeps showing what the system says when the change fails', async () => {
+      feed.startup = { enabled: false, hidden: true };
+      feed.startupFails = true;
+      await open();
+      await fireEvent.click(box(/with the computer/));
+      await tick();
+      expect(box(/with the computer/).checked).toBe(false);
+      expect(screen.getByRole('alert').textContent).toBe('This setting could not be changed.');
     });
   });
 

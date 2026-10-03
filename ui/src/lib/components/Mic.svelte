@@ -9,6 +9,7 @@
     MIC_TYPES,
     type CompressorSettingId,
     type GateSettingId,
+    type MicBlockId,
     type Snapshot,
   } from '../device';
   import { i18n } from '../i18n/index.svelte';
@@ -42,12 +43,34 @@
     sendIntent({ type: 'setCompressor', setting, value });
 </script>
 
+<!-- The way back from a setting that hurts the ears. -->
+{#snippet head(title: string, block: MicBlockId)}
+  <div class="head">
+    <h2>{title}</h2>
+    <button
+      type="button"
+      class="reset"
+      aria-label={i18n.t.mic.resetNamed.replace('{group}', title)}
+      onclick={() => sendIntent({ type: 'resetMic', block })}
+    >
+      {i18n.t.mic.reset}
+    </button>
+  </div>
+{/snippet}
+
 <section class="page">
   <h1>{i18n.t.nav.mic}</h1>
   {#if device && mic}
     <p class="hint">{i18n.t.mic.hint}</p>
     <div class="meter">
       <MicMeter levelDb={device.micLevelDb} />
+      <button
+        type="button"
+        class="reset"
+        onclick={() => sendIntent({ type: 'resetMic', block: 'all' })}
+      >
+        {i18n.t.mic.resetAll}
+      </button>
     </div>
 
     <section class="card">
@@ -82,7 +105,7 @@
     </section>
 
     <section class="card">
-      <h2>{i18n.t.mic.gate}</h2>
+      {@render head(i18n.t.mic.gate, 'gate')}
       <p class="hint">{i18n.t.mic.gateHint}</p>
       <MicSlider
         name={i18n.t.mic.threshold}
@@ -123,7 +146,7 @@
     </section>
 
     <section class="card">
-      <h2>{i18n.t.mic.compressor}</h2>
+      {@render head(i18n.t.mic.compressor, 'compressor')}
       <p class="hint">{i18n.t.mic.compressorHint}</p>
       <MicSlider
         name={i18n.t.mic.threshold}
@@ -173,7 +196,7 @@
     </section>
 
     <section class="card">
-      <h2>{i18n.t.mic.equalizer}</h2>
+      {@render head(i18n.t.mic.equalizer, 'equalizer')}
       <p class="hint">{i18n.t.mic.equalizerHint}</p>
       <EqCurve
         bands={mic.equalizer}
@@ -183,7 +206,7 @@
     </section>
 
     <section class="card">
-      <h2>{i18n.t.mic.deEsser}</h2>
+      {@render head(i18n.t.mic.deEsser, 'deEsser')}
       <p class="hint">{i18n.t.mic.deEsserHint}</p>
       <MicSlider
         name={i18n.t.mic.amount}
@@ -213,8 +236,39 @@
   }
 
   .meter {
-    max-width: 420px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px 28px;
     margin: 18px 0 8px;
+  }
+
+  .meter > :global(:first-child) {
+    flex: 1 1 320px;
+    max-width: 420px;
+  }
+
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .reset {
+    flex: none;
+    padding: 5px 12px;
+    border: 1px solid var(--unlit);
+    border-radius: 4px;
+    background: none;
+    color: var(--legend);
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .reset:hover {
+    border-color: var(--legend);
+    color: var(--silkscreen);
   }
 
   .card {

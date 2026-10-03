@@ -9,11 +9,61 @@ export const en = {
     controls: 'Controls',
     lighting: 'Lighting',
     plugins: 'Plugins',
+    profiles: 'Profiles',
     settings: 'Settings',
   },
   profile: {
     label: 'Profile',
     none: 'No profile yet',
+    manage: 'Manage profiles',
+  },
+  // Shown as long as the device is set to something that is not saved.
+  unsaved: {
+    tag: 'Unsaved changes',
+    body: 'The GoXLR already follows your settings. Save them to find them again next time.',
+    save: 'Save',
+  },
+  profiles: {
+    hint: 'A profile is made of pieces saved apart. Change one piece and the others stay as they are.',
+    later: 'Controls and lighting will become pieces too, in a later version.',
+    kinds: {
+      profile: { title: 'Profiles', hint: 'Which mix and which microphone go together.' },
+      mix: { title: 'Mixes', hint: 'Faders, volumes and routing.' },
+      mic: { title: 'Microphones', hint: 'Microphone type, gain and processing.' },
+    },
+    inUse: 'In use',
+    modified: 'Not saved',
+    save: 'Save',
+    saveAs: 'Save as…',
+    rename: 'Rename',
+    duplicate: 'Duplicate',
+    delete: 'Delete',
+    renameNamed: 'Rename {name}',
+    duplicateNamed: 'Duplicate {name}',
+    deleteNamed: 'Delete {name}',
+    name: 'Name',
+    confirm: 'OK',
+    cancel: 'Cancel',
+    deleteQuestion: 'Delete “{name}”? This cannot be undone.',
+    switchQuestion: 'Switch to “{name}”? The changes that are not saved will be lost.',
+    switchAnyway: 'Switch anyway',
+    errors: {
+      invalidName:
+        'This name cannot be used. Keep it under 60 characters, without / \\ : * ? " < > |.',
+      nameTaken: 'This name is already taken.',
+      inUse: 'It is in use. Switch to another one first, or take it out of the profiles made of it.',
+      notFound: 'It is no longer there.',
+      unreadable: 'Its file cannot be read.',
+      storage: 'Could not write to the disk.',
+    },
+  },
+  // Asked when quitting while something is not saved.
+  quit: {
+    title: 'Quit without saving?',
+    body: 'Some settings are not saved. They will be lost when GoXLR Hub quits.',
+    save: 'Save and quit',
+    discard: 'Quit without saving',
+    cancel: 'Cancel',
   },
   comingSoon: {
     tag: 'Coming soon',
@@ -50,6 +100,22 @@ export const en = {
     muted: 'Muted',
     live: 'Live',
     micLevel: 'Microphone level',
+  },
+  pads: {
+    title: 'Sampler pads',
+    hint: 'They light up here when you press them on the GoXLR. Choosing what they do comes with Controls.',
+    pressed: '{pad}, pressed',
+    released: '{pad}, released',
+    names: {
+      samplerSelectA: 'Bank A',
+      samplerSelectB: 'Bank B',
+      samplerSelectC: 'Bank C',
+      samplerTopLeft: 'Top left',
+      samplerTopRight: 'Top right',
+      samplerBottomLeft: 'Bottom left',
+      samplerBottomRight: 'Bottom right',
+      samplerClear: 'Clear',
+    },
   },
   channelList: {
     hint: 'The volume of every channel, including those that are on no fader.',
@@ -120,6 +186,9 @@ export const en = {
     deEsserHint: 'Softens the hiss of the letter s.',
     amount: 'Amount',
     setting: '{group}: {name}',
+    reset: 'Reset to neutral',
+    resetNamed: 'Reset to neutral: {group}',
+    resetAll: 'Reset all the processing to neutral',
   },
   device: {
     title: 'Device',
@@ -143,6 +212,10 @@ export const en = {
   },
   settings: {
     language: 'Language',
+    startup: 'Startup',
+    startWithComputer: 'Start GoXLR Hub with the computer',
+    startHidden: 'Started that way, stay hidden in the system tray',
+    startupFailed: 'This setting could not be changed.',
   },
 };
 

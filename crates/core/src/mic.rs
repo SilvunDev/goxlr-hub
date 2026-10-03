@@ -2,6 +2,8 @@
 //! to it. The device cannot be asked for any of it, so the app keeps it and
 //! sends it.
 
+use std::collections::BTreeMap;
+
 use goxlr_hub_device::{Device, DeviceError};
 use goxlr_hub_protocol::{
     COMPRESSOR_ATTACK_MS, COMPRESSOR_RATIOS, COMPRESSOR_RELEASE_MS, EffectKey, EqBand,
@@ -37,6 +39,11 @@ const STARTING_FREQUENCIES: [f32; EqBand::COUNT] = [
     31.5, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
 ];
 
+/// Two bands are kept this far apart, about a sixth of an octave: at the
+/// same frequency, one would hide the other and the curve could not go
+/// through both.
+const BAND_GAP: f32 = 1.12;
+
 /// The equaliser turns a band up or down by 9 dB at most.
 const MAX_EQ_GAIN_DB: i8 = 9;
 
@@ -51,6 +58,15 @@ pub enum GateSetting {
     Attack,
     /// A rank in `GATE_TIMES_MS`.
     Release,
+}
+
+impl GateSetting {
+    const ALL: [Self; 4] = [
+        Self::Threshold,
+        Self::Attenuation,
+        Self::Attack,
+        Self::Release,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -68,7 +84,29 @@ pub enum CompressorSetting {
     MakeupGain,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+impl CompressorSetting {
+    const ALL: [Self; 5] = [
+        Self::Threshold,
+        Self::Ratio,
+        Self::Attack,
+        Self::Release,
+        Self::MakeupGain,
+    ];
+}
+
+/// A part of the microphone processing that can be put back to neutral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MicBlock {
+    Gate,
+    Compressor,
+    Equalizer,
+    DeEsser,
+    /// The four of them. The type and the gain are left alone.
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Gate {
     pub threshold: i8,
     pub attenuation: u8,
@@ -117,7 +155,7 @@ impl Gate {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Compressor {
     pub threshold: i8,
@@ -178,7 +216,7 @@ impl Compressor {
 
 /// One band of the equaliser: where it sits and how much it turns up or
 /// down.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct EqPoint {
     /// In hertz.
     pub frequency: f32,
@@ -252,15 +290,20 @@ impl MicState {
     }
 
     /// How far a band can be moved: within its part of the spectrum, and
-    /// never past its neighbours.
+    /// never as far as its neighbours. A band squeezed between two others
+    /// stays where it is.
     pub fn frequency_bounds(&self, band: EqBand) -> (f32, f32) {
         let at = band as usize;
         let (mut min, mut max) = band_range(at);
         if let Some(lower) = at.checked_sub(1) {
-            min = min.max(self.equalizer[lower].frequency);
+            min = min.max(self.equalizer[lower].frequency * BAND_GAP);
         }
         if let Some(higher) = self.equalizer.get(at + 1) {
-            max = max.min(higher.frequency);
+            max = max.min(higher.frequency / BAND_GAP);
+        }
+        if min > max {
+            let here = self.equalizer[at].frequency;
+            return (here, here);
         }
         (min, max)
     }
@@ -274,28 +317,110 @@ impl MicState {
         for (key, value) in FIXED_EFFECTS {
             device.set_effect(key, value)?;
         }
-        for setting in [
-            GateSetting::Threshold,
-            GateSetting::Attenuation,
-            GateSetting::Attack,
-            GateSetting::Release,
-        ] {
+        for setting in GateSetting::ALL {
             self.gate.send(device, setting)?;
         }
-        for setting in [
-            CompressorSetting::Threshold,
-            CompressorSetting::Ratio,
-            CompressorSetting::Attack,
-            CompressorSetting::Release,
-            CompressorSetting::MakeupGain,
-        ] {
+        for setting in CompressorSetting::ALL {
             self.compressor.send(device, setting)?;
         }
+        self.send_equalizer(device)?;
+        device.set_effect(EffectKey::DeEsser, i32::from(self.de_esser))
+    }
+
+    fn send_equalizer(&self, device: &mut dyn Device) -> Result<(), DeviceError> {
         for (band, point) in EqBand::ALL.into_iter().zip(self.equalizer) {
             send_frequency(device, band, point.frequency)?;
             device.set_effect(EffectKey::EqGain(band), i32::from(point.gain))?;
         }
-        device.set_effect(EffectKey::DeEsser, i32::from(self.de_esser))
+        Ok(())
+    }
+
+    /// Puts a part of the processing back to what it is on a device the app
+    /// meets.
+    pub fn reset(&mut self, device: &mut dyn Device, block: MicBlock) -> Result<(), DeviceError> {
+        let neutral = Self::unknown();
+        let all = block == MicBlock::All;
+        if all || block == MicBlock::Gate {
+            for setting in GateSetting::ALL {
+                neutral.gate.send(device, setting)?;
+            }
+            self.gate = neutral.gate;
+        }
+        if all || block == MicBlock::Compressor {
+            for setting in CompressorSetting::ALL {
+                neutral.compressor.send(device, setting)?;
+            }
+            self.compressor = neutral.compressor;
+        }
+        if all || block == MicBlock::Equalizer {
+            neutral.send_equalizer(device)?;
+            self.equalizer = neutral.equalizer;
+        }
+        if all || block == MicBlock::DeEsser {
+            self.set_de_esser(device, neutral.de_esser)?;
+        }
+        Ok(())
+    }
+
+    /// The microphone as a file keeps it.
+    pub(crate) fn to_file(&self) -> MicFile {
+        MicFile {
+            mic_type: self.mic_type,
+            gain: MicType::ALL.into_iter().zip(self.gains).collect(),
+            de_esser: self.de_esser,
+            gate: self.gate,
+            compressor: self.compressor,
+            equalizer: self.equalizer.to_vec(),
+        }
+    }
+
+    /// The microphone a file describes, every value brought within its
+    /// bounds. Nothing when the equaliser has not its ten bands.
+    pub(crate) fn from_file(file: MicFile) -> Option<Self> {
+        let mut mic = Self::unknown();
+        mic.mic_type = file.mic_type;
+        for (mic_type, gain) in file.gain {
+            mic.gains[mic_type as usize] = gain.min(MAX_GAIN_DB);
+        }
+        for setting in GateSetting::ALL {
+            let value = match setting {
+                GateSetting::Threshold => i32::from(file.gate.threshold),
+                GateSetting::Attenuation => i32::from(file.gate.attenuation),
+                GateSetting::Attack => i32::from(file.gate.attack),
+                GateSetting::Release => i32::from(file.gate.release),
+            };
+            mic.gate = mic.gate.with(setting, value);
+        }
+        for setting in CompressorSetting::ALL {
+            let value = match setting {
+                CompressorSetting::Threshold => i32::from(file.compressor.threshold),
+                CompressorSetting::Ratio => i32::from(file.compressor.ratio),
+                CompressorSetting::Attack => i32::from(file.compressor.attack),
+                CompressorSetting::Release => i32::from(file.compressor.release),
+                CompressorSetting::MakeupGain => i32::from(file.compressor.makeup_gain),
+            };
+            mic.compressor = mic.compressor.with(setting, value);
+        }
+        let points: [EqPoint; EqBand::COUNT] = file.equalizer.try_into().ok()?;
+        // Lowest band first: each one stays within its part of the spectrum
+        // and apart from the one before.
+        let mut floor = 0.0_f32;
+        for (at, point) in points.into_iter().enumerate() {
+            let (min, max) = band_range(at);
+            let wanted = if point.frequency.is_finite() {
+                point.frequency
+            } else {
+                STARTING_FREQUENCIES[at]
+            };
+            let frequency = wanted.clamp(min.max(floor).min(max), max);
+            floor = frequency * BAND_GAP;
+            mic.equalizer[at] = EqPoint {
+                frequency,
+                gain: point.gain.clamp(-MAX_EQ_GAIN_DB, MAX_EQ_GAIN_DB),
+            };
+        }
+        mic.de_esser = file.de_esser.min(100);
+        Some(mic)
     }
 
     /// Chooses how the microphone is plugged in. The gain of that type goes
@@ -413,6 +538,22 @@ fn send_frequency(
     frequency: f32,
 ) -> Result<(), DeviceError> {
     device.set_effect(EffectKey::EqFrequency(band), eq_frequency_value(frequency))
+}
+
+/// The microphone as a file keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MicFile {
+    /// Left out until it is chosen.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    mic_type: Option<MicType>,
+    de_esser: u8,
+    /// The gain of each type, in decibels.
+    #[serde(default)]
+    gain: BTreeMap<MicType, u8>,
+    gate: Gate,
+    compressor: Compressor,
+    equalizer: Vec<EqPoint>,
 }
 
 /// The microphone as the interface receives it.
@@ -623,19 +764,51 @@ mod tests {
         assert_eq!(state.effects.len(), 3);
         assert_eq!(state.effects[&EffectKey::EqGain(EqBand::Hz63)], -9);
 
-        // 500 Hz stops at the band above, which now sits at 1500 Hz.
-        assert_eq!(mic.frequency_bounds(EqBand::Hz500), (300.0, 1500.0));
+        // 500 Hz stops short of the band above, which now sits at 1500 Hz:
+        // two bands never share a frequency.
+        let below = 1500.0 / BAND_GAP;
+        let above = 1500.0 * BAND_GAP;
+        assert_eq!(mic.frequency_bounds(EqBand::Hz500), (300.0, below));
         mic.set_eq_band(device.as_mut(), EqBand::Hz500, 1900.0, 0)
             .unwrap();
-        assert_eq!(mic.equalizer[4].frequency, 1500.0);
-        // 2 kHz stops at the end of the middle bands, and at the band below.
-        assert_eq!(mic.frequency_bounds(EqBand::Khz2), (1500.0, 2000.0));
+        assert_eq!(mic.equalizer[4].frequency, below);
+        assert!(below < 1400.0);
+        // 2 kHz stops at the end of the middle bands, and short of the band
+        // below.
+        assert_eq!(mic.frequency_bounds(EqBand::Khz2), (above, 2000.0));
         mic.set_eq_band(device.as_mut(), EqBand::Khz2, 20.0, 0)
             .unwrap();
-        assert_eq!(mic.equalizer[6].frequency, 1500.0);
+        assert_eq!(mic.equalizer[6].frequency, above);
+        // The band between them has nowhere to go.
+        assert_eq!(mic.frequency_bounds(EqBand::Khz1), (1500.0, 1500.0));
+        mic.set_eq_band(device.as_mut(), EqBand::Khz1, 600.0, 2)
+            .unwrap();
+        assert_eq!(
+            (mic.equalizer[5].frequency, mic.equalizer[5].gain),
+            (1500.0, 2)
+        );
         // The ends only have one neighbour.
-        assert_eq!(mic.frequency_bounds(EqBand::Hz31), (30.0, 63.0));
-        assert_eq!(mic.frequency_bounds(EqBand::Khz16), (8000.0, 18000.0));
+        assert_eq!(mic.frequency_bounds(EqBand::Hz31), (30.0, 63.0 / BAND_GAP));
+        assert_eq!(
+            mic.frequency_bounds(EqBand::Khz16),
+            (8000.0 * BAND_GAP, 18000.0)
+        );
+        // Bands that were left at the same place come apart when moved, and
+        // one squeezed between two others stays: never a crash.
+        let mut piled = MicState::unknown();
+        piled.equalizer[1].frequency = 125.0;
+        piled
+            .set_eq_band(device.as_mut(), EqBand::Hz63, 124.0, 1)
+            .unwrap();
+        assert_eq!(piled.equalizer[1].frequency, 125.0 / BAND_GAP);
+        piled.equalizer[0].frequency = 100.0;
+        piled.equalizer[1].frequency = 105.0;
+        piled.equalizer[2].frequency = 110.0;
+        assert_eq!(piled.frequency_bounds(EqBand::Hz63), (105.0, 105.0));
+        piled
+            .set_eq_band(device.as_mut(), EqBand::Hz63, 40.0, 2)
+            .unwrap();
+        assert_eq!(piled.equalizer[1].frequency, 105.0);
 
         mic.set_eq_band(device.as_mut(), EqBand::Khz16, f32::INFINITY, 100)
             .unwrap();

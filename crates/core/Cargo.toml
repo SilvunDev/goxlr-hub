@@ -12,6 +12,7 @@ publish = false
 goxlr-hub-device = { path = "../device" }
 goxlr-hub-protocol = { path = "../protocol", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+toml = "1"
 
 [dev-dependencies]
 serde_json = "1"
