@@ -13,18 +13,48 @@ export type ChannelId =
   | 'micMonitor'
   | 'lineOut';
 
+/** Every channel, in the numbering of the device. */
+export const CHANNELS: readonly ChannelId[] = [
+  'mic',
+  'lineIn',
+  'console',
+  'system',
+  'game',
+  'chat',
+  'sample',
+  'music',
+  'headphones',
+  'micMonitor',
+  'lineOut',
+];
+
 export type FaderId = 'a' | 'b' | 'c' | 'd';
 
+export const MAX_VOLUME = 255;
+
 export interface ChannelView {
+  channel: ChannelId;
+  /** 0 to 255, or `null` when the app does not know it. */
+  volume: number | null;
+  muted: boolean;
+  /** The fader that carries the channel, if any. */
+  fader: FaderId | null;
+}
+
+export interface FaderView {
+  fader: FaderId;
   channel: ChannelId;
   /** 0 to 255. */
   volume: number;
   muted: boolean;
 }
 
-export interface FaderView extends ChannelView {
-  fader: FaderId;
-}
+/** What the interface asks of the device. The answer is the next snapshot. */
+export type Intent =
+  | { type: 'setVolume'; channel: ChannelId; volume: number }
+  | { type: 'setMuted'; channel: ChannelId; muted: boolean }
+  | { type: 'setMicOff'; off: boolean }
+  | { type: 'assignFader'; fader: FaderId; channel: ChannelId };
 
 /**
  * Which device is shown, and why. Anything but `hardware` means the virtual
@@ -48,6 +78,8 @@ export interface Snapshot {
   };
   faders: FaderView[];
   channels: ChannelView[];
+  /** The microphone itself is off, whatever its channel says. */
+  micOff: boolean;
   /** Buttons held down right now. */
   pressed: string[];
   /** Between -72.2 (silence) and 0 (full scale). */
@@ -56,7 +88,7 @@ export interface Snapshot {
 
 /** A volume as a whole percentage. */
 export function volumePercent(volume: number): number {
-  const percent = Math.round((volume / 255) * 100);
+  const percent = Math.round((volume / MAX_VOLUME) * 100);
   return Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) : 0;
 }
 

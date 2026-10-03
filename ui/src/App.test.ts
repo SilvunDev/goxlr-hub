@@ -6,10 +6,17 @@ import type { ChannelId, FaderId, Snapshot } from './lib/device';
 import { i18n } from './lib/i18n/index.svelte';
 
 // Stands in for the Rust side: `feed.push` plays the device reporting its state.
-const feed = vi.hoisted(() => ({ push: (_snapshot: unknown) => {} }));
+// `feed.sent` collects what the interface asks of the device.
+const feed = vi.hoisted(() => ({
+  push: (_snapshot: unknown) => {},
+  sent: [] as unknown[],
+}));
 
 vi.mock('./lib/backend', () => ({
   syncLocale: async () => {},
+  sendIntent: (intent: unknown) => {
+    feed.sent.push(intent);
+  },
   onDeviceState: (handler: (snapshot: unknown) => void) => {
     feed.push = handler;
     return () => {};
@@ -32,7 +39,13 @@ function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
       fader('c', 'music', 0),
       fader('d', 'system', 51),
     ],
-    channels: [],
+    channels: [
+      { channel: 'mic', volume: 255, muted: false, fader: 'a' },
+      { channel: 'chat', volume: 128, muted: true, fader: 'b' },
+      { channel: 'game', volume: 51, muted: false, fader: null },
+      { channel: 'headphones', volume: null, muted: false, fader: null },
+    ],
+    micOff: false,
     pressed: [],
     micLevelDb: -23.44,
     ...overrides,
@@ -54,6 +67,7 @@ function menuLabels(): string[] {
 describe('App', () => {
   beforeEach(() => {
     i18n.setLocale('en');
+    feed.sent.length = 0;
   });
 
   it('lists every section in order, then settings', () => {
@@ -82,6 +96,8 @@ describe('App', () => {
     render(App);
     await fireEvent.click(screen.getByRole('button', { name: 'Routing' }));
     expect(screen.getByText('Coming soon')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Mixer' }));
+    expect(screen.queryByText(/later version/)).toBeNull();
   });
 
   it('switches the whole interface to French from settings', async () => {
@@ -135,12 +151,9 @@ describe('App', () => {
         'Fader C',
         'Fader D',
       ]);
-      expect(strips.map((strip) => within(strip).getByRole('strong').textContent)).toEqual([
-        'Mic',
-        'Chat',
-        'Music',
-        'System',
-      ]);
+      expect(
+        strips.map((strip) => (within(strip).getByRole('combobox') as HTMLSelectElement).value),
+      ).toEqual(['mic', 'chat', 'music', 'system']);
       expect(strips.map((strip) => within(strip).getByText(/%$/).textContent)).toEqual([
         '100%',
         '50%',
@@ -148,7 +161,7 @@ describe('App', () => {
         '20%',
       ]);
       expect(
-        within(strips[3]).getByRole('meter', { name: 'System' }).getAttribute('aria-valuenow'),
+        within(strips[3]).getByRole('slider', { name: 'System' }).getAttribute('aria-valuenow'),
       ).toBe('20');
     });
 
@@ -202,9 +215,162 @@ describe('App', () => {
 
       expect(screen.getByRole('status').textContent).toContain('Mode démonstration');
       expect(screen.getByText('Coupé')).toBeTruthy();
-      expect(screen.getByText('Musique')).toBeTruthy();
+      expect(screen.getByRole('slider', { name: 'Musique' })).toBeTruthy();
       expect(screen.getByText('GoXLR virtuelle')).toBeTruthy();
       expect(screen.getByText('-23,4 dB')).toBeTruthy();
+    });
+  });
+
+  describe('when the mixer is handled from the screen', () => {
+    it('sets the volume of a fader from the keyboard', async () => {
+      render(App);
+      await report(snapshot());
+      const fader = screen.getByRole('slider', { name: 'Chat' });
+      await fireEvent.keyDown(fader, { key: 'ArrowUp' });
+      await fireEvent.keyDown(fader, { key: 'End' });
+      await fireEvent.keyDown(fader, { key: 'Home' });
+      expect(feed.sent).toEqual([
+        { type: 'setVolume', channel: 'chat', volume: 131 },
+        { type: 'setVolume', channel: 'chat', volume: 255 },
+        { type: 'setVolume', channel: 'chat', volume: 0 },
+      ]);
+    });
+
+    it('never asks for a volume out of range', async () => {
+      render(App);
+      await report(snapshot());
+      await fireEvent.keyDown(screen.getByRole('slider', { name: 'Mic' }), { key: 'ArrowUp' });
+      await fireEvent.keyDown(screen.getByRole('slider', { name: 'Music' }), { key: 'PageDown' });
+      expect(feed.sent).toEqual([]);
+    });
+
+    it('sets the volume of a fader with the pointer', async () => {
+      render(App);
+      await report(snapshot());
+      const fader = screen.getByRole('slider', { name: 'System' });
+      fader.getBoundingClientRect = () => ({ top: 100, height: 200 }) as DOMRect;
+      await fireEvent.pointerDown(fader, { clientY: 150, button: 0 });
+      await fireEvent.pointerMove(fader, { clientY: 100 });
+      await fireEvent.pointerMove(fader, { clientY: 20 });
+      await fireEvent.pointerUp(fader);
+      await fireEvent.pointerMove(fader, { clientY: 300 });
+      expect(feed.sent).toEqual([
+        { type: 'setVolume', channel: 'system', volume: 191 },
+        { type: 'setVolume', channel: 'system', volume: 255 },
+      ]);
+      expect(within(screen.getAllByRole('article')[3]).getByText('100%')).toBeTruthy();
+    });
+
+    it('mutes a live channel and opens a muted one', async () => {
+      render(App);
+      await report(snapshot());
+      const mic = screen.getByRole('button', { name: 'Mute Mic' });
+      const chat = screen.getByRole('button', { name: 'Mute Chat' });
+      expect(mic.getAttribute('aria-pressed')).toBe('false');
+      expect(chat.getAttribute('aria-pressed')).toBe('true');
+      await fireEvent.click(mic);
+      await fireEvent.click(chat);
+      expect(feed.sent).toEqual([
+        { type: 'setMuted', channel: 'mic', muted: true },
+        { type: 'setMuted', channel: 'chat', muted: false },
+      ]);
+    });
+
+    it('turns the microphone off apart from the mute of its channel', async () => {
+      render(App);
+      await report(snapshot());
+      const button = screen.getByRole('button', { name: 'Turn the microphone off' });
+      expect(button.getAttribute('aria-pressed')).toBe('false');
+      expect(button.textContent?.trim()).toBe('Live');
+      await fireEvent.click(button);
+      expect(feed.sent).toEqual([{ type: 'setMicOff', off: true }]);
+
+      await report(snapshot({ micOff: true }));
+      const off = screen.getByRole('button', { name: 'Turn the microphone off' });
+      expect(off.getAttribute('aria-pressed')).toBe('true');
+      expect(off.textContent?.trim()).toBe('Muted');
+      expect(screen.getByRole('button', { name: 'Mute Mic' }).getAttribute('aria-pressed')).toBe(
+        'false',
+      );
+      await fireEvent.click(off);
+      expect(feed.sent[1]).toEqual({ type: 'setMicOff', off: false });
+    });
+
+    it('puts another channel under a fader', async () => {
+      render(App);
+      await report(snapshot());
+      const source = screen.getByRole('combobox', { name: 'Channel of fader C' });
+      expect(within(source).getAllByRole('option')).toHaveLength(11);
+      await fireEvent.change(source, { target: { value: 'game' } });
+      expect(feed.sent).toEqual([{ type: 'assignFader', fader: 'c', channel: 'game' }]);
+    });
+
+    it('keeps showing what the device says, not what was asked', async () => {
+      render(App);
+      await report(snapshot());
+      await fireEvent.click(screen.getByRole('button', { name: 'Mute Mic' }));
+      await report(snapshot());
+      expect(screen.getByRole('button', { name: 'Mute Mic' }).getAttribute('aria-pressed')).toBe(
+        'false',
+      );
+    });
+  });
+
+  describe('on the channels section', () => {
+    async function open() {
+      render(App);
+      await report(snapshot());
+      await fireEvent.click(screen.getByRole('button', { name: 'Channels' }));
+    }
+
+    it('lists every channel it is told about, with its fader', async () => {
+      await open();
+      const rows = screen.getAllByRole('listitem');
+      expect(rows.map((row) => within(row).getByRole('slider').getAttribute('aria-label'))).toEqual(
+        ['Mic', 'Chat', 'Game', 'Headphones'],
+      );
+      expect(within(rows[1]).getByText('Fader B')).toBeTruthy();
+      expect(within(rows[1]).getByText('50%')).toBeTruthy();
+      expect(within(rows[2]).queryByText(/Fader/)).toBeNull();
+    });
+
+    it('says in words when a volume is not known', async () => {
+      await open();
+      const row = screen.getAllByRole('listitem')[3];
+      expect(within(row).getByText('Unknown')).toBeTruthy();
+      expect(within(row).queryByText(/%/)).toBeNull();
+      expect(screen.getByText(/cannot tell the volume/)).toBeTruthy();
+
+      i18n.setLocale('fr');
+      await tick();
+      expect(within(screen.getAllByRole('listitem')[3]).getByText('Inconnu')).toBeTruthy();
+    });
+
+    it('does not talk about unknown volumes when all are known', async () => {
+      render(App);
+      const state = snapshot();
+      state.channels = state.channels.slice(0, 3);
+      await report(state);
+      await fireEvent.click(screen.getByRole('button', { name: 'Channels' }));
+      expect(screen.queryByText(/cannot tell the volume/)).toBeNull();
+    });
+
+    it('sets the volume and the mute of a channel that is on no fader', async () => {
+      await open();
+      await fireEvent.input(screen.getByRole('slider', { name: 'Headphones' }), {
+        target: { value: '90' },
+      });
+      await fireEvent.click(screen.getByRole('button', { name: 'Mute Game' }));
+      expect(feed.sent).toEqual([
+        { type: 'setVolume', channel: 'headphones', volume: 90 },
+        { type: 'setMuted', channel: 'game', muted: true },
+      ]);
+    });
+
+    it('waits for the device', async () => {
+      render(App);
+      await fireEvent.click(screen.getByRole('button', { name: 'Channels' }));
+      expect(screen.getByText('Connecting…')).toBeTruthy();
     });
   });
 

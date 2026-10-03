@@ -5,7 +5,11 @@ macro_rules! listed_enum {
     ($(#[$meta:meta])* $name:ident { $($variant:ident $(= $value:expr)?),+ $(,)? }) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        #[cfg_attr(feature = "serde", derive(serde::Serialize), serde(rename_all = "camelCase"))]
+        #[cfg_attr(
+            feature = "serde",
+            derive(serde::Serialize, serde::Deserialize),
+            serde(rename_all = "camelCase")
+        )]
         pub enum $name { $($variant $(= $value)?),+ }
 
         impl $name {
@@ -116,6 +120,56 @@ impl ButtonSet {
         Button::ALL
             .into_iter()
             .filter(move |button| self.contains(*button))
+    }
+}
+
+/// How a button is lit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonLight {
+    Lit = 0x01,
+    Dimmed = 0x02,
+}
+
+/// The light of every button, sent as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ButtonLights([ButtonLight; Self::LEN]);
+
+impl Default for ButtonLights {
+    fn default() -> Self {
+        Self([ButtonLight::Dimmed; Self::LEN])
+    }
+}
+
+impl ButtonLights {
+    /// One byte per button, at the position of its bit in the status word.
+    pub const LEN: usize = Button::ALL.len();
+
+    pub fn get(&self, button: Button) -> ButtonLight {
+        self.0[usize::from(button.bit())]
+    }
+
+    pub fn set(&mut self, button: Button, light: ButtonLight) {
+        self.0[usize::from(button.bit())] = light;
+    }
+
+    pub fn bytes(&self) -> [u8; Self::LEN] {
+        self.0.map(|light| light as u8)
+    }
+
+    /// `None` when the size is wrong or a byte is no light this app sends.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut lights = Self::default();
+        if bytes.len() != Self::LEN {
+            return None;
+        }
+        for (light, byte) in lights.0.iter_mut().zip(bytes) {
+            *light = match byte {
+                0x01 => ButtonLight::Lit,
+                0x02 => ButtonLight::Dimmed,
+                _ => return None,
+            };
+        }
+        Some(lights)
     }
 }
 
@@ -260,6 +314,20 @@ mod tests {
         assert!(set.contains(Button::Bleep));
         set.remove(Button::Bleep);
         assert_eq!(set, ButtonSet::default());
+    }
+
+    #[test]
+    fn button_lights_sit_at_the_bit_of_their_button() {
+        let mut lights = ButtonLights::default();
+        assert_eq!(lights.bytes(), [0x02; 24]);
+        lights.set(Button::Fader2Mute, ButtonLight::Lit);
+        lights.set(Button::MicMute, ButtonLight::Lit);
+        let bytes = lights.bytes();
+        assert_eq!((bytes[9], bytes[23], bytes[4]), (0x01, 0x01, 0x02));
+        assert_eq!(lights.get(Button::Fader2Mute), ButtonLight::Lit);
+        assert_eq!(ButtonLights::from_bytes(&bytes), Some(lights));
+        assert_eq!(ButtonLights::from_bytes(&bytes[..23]), None);
+        assert_eq!(ButtonLights::from_bytes(&[0x03; 24]), None);
     }
 
     #[test]

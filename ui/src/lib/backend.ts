@@ -1,7 +1,7 @@
 // The only place where the interface talks to the Rust side.
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { Snapshot } from './device';
+import type { Intent, Snapshot } from './device';
 import type { Locale } from './i18n/locale';
 
 /** Tells the Rust side which language to use for the tray menu. */
@@ -12,6 +12,17 @@ export async function syncLocale(locale: Locale): Promise<void> {
     await invoke('set_locale', { tag: locale });
   } catch (error) {
     console.error('Could not update the tray menu language', error);
+  }
+}
+
+/** Asks the Rust side to change something on the device shown. */
+export async function sendIntent(intent: Intent): Promise<void> {
+  // Outside Tauri there is no device to change.
+  if (!isTauri()) return;
+  try {
+    await invoke('mixer_intent', { intent });
+  } catch (error) {
+    console.error('Could not reach the device', error);
   }
 }
 

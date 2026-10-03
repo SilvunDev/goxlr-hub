@@ -1,4 +1,7 @@
-use crate::{Channel, Fader, MicType, OutputSet, ProtocolError, RoutingInput, RoutingOutput, Side};
+use crate::{
+    ButtonLights, Channel, Fader, MicType, OutputSet, ProtocolError, RoutingInput, RoutingOutput,
+    Side,
+};
 
 /// Size of a routing body on a full-size GoXLR.
 const ROUTING_LEN: usize = 22;
@@ -6,15 +9,20 @@ const ROUTING_LEN: usize = 22;
 const ROUTED: u8 = 0x20;
 
 const FAMILY_STATUS: u32 = 0x800;
+const FAMILY_EFFECTS: u32 = 0x801;
 const FAMILY_ROUTING: u32 = 0x804;
 const FAMILY_FADER: u32 = 0x805;
 const FAMILY_VOLUME: u32 = 0x806;
+const FAMILY_BUTTON_LIGHTS: u32 = 0x808;
 const FAMILY_MUTE: u32 = 0x809;
 const FAMILY_MIC_PARAMS: u32 = 0x80b;
 const FAMILY_MIC_LEVEL: u32 = 0x80c;
 const FAMILY_HARDWARE_INFO: u32 = 0x80f;
 
 const MIC_PARAM_TYPE: u32 = 0;
+
+/// The effect parameter that silences the microphone input.
+const EFFECT_MIC_INPUT_MUTE: u32 = 0x0158;
 
 /// A command the app sends to the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +52,14 @@ pub enum Request {
         input: RoutingInput,
         side: Side,
         outputs: OutputSet,
+    },
+    /// Lights every button at once.
+    SetButtonLights {
+        lights: ButtonLights,
+    },
+    /// Silences the microphone itself, before any channel or effect.
+    SetMicInputMuted {
+        muted: bool,
     },
     /// Selects the microphone type and its gain.
     SetMicGain {
@@ -76,6 +92,8 @@ impl Request {
             Self::SetVolume { channel, .. } => id(FAMILY_VOLUME, channel.index()),
             Self::SetMuted { channel, .. } => id(FAMILY_MUTE, channel.index()),
             Self::SetRouting { input, side, .. } => id(FAMILY_ROUTING, input.id(side)),
+            Self::SetButtonLights { .. } => id(FAMILY_BUTTON_LIGHTS, 0),
+            Self::SetMicInputMuted { .. } => id(FAMILY_EFFECTS, 0),
             Self::SetMicGain { .. } => id(FAMILY_MIC_PARAMS, 0),
         }
     }
@@ -95,6 +113,13 @@ impl Request {
                 for output in outputs.iter() {
                     body[output.position(side)] = ROUTED;
                 }
+                body
+            }
+            Self::SetButtonLights { lights } => lights.bytes().to_vec(),
+            Self::SetMicInputMuted { muted } => {
+                let mut body = Vec::with_capacity(8);
+                body.extend_from_slice(&EFFECT_MIC_INPUT_MUTE.to_le_bytes());
+                body.extend_from_slice(&u32::from(muted).to_le_bytes());
                 body
             }
             Self::SetMicGain { mic_type, gain } => {
@@ -171,6 +196,23 @@ impl Request {
                     outputs,
                 })
             }
+            (FAMILY_BUTTON_LIGHTS, 0) => {
+                expect_len(body, ButtonLights::LEN)?;
+                let lights = ButtonLights::from_bytes(body)
+                    .ok_or(ProtocolError::InvalidBody("no such button light"))?;
+                Ok(Self::SetButtonLights { lights })
+            }
+            (FAMILY_EFFECTS, 0) => {
+                expect_len(body, 8)?;
+                let word = |at: usize| {
+                    u32::from_le_bytes([body[at], body[at + 1], body[at + 2], body[at + 3]])
+                };
+                match (word(0), word(4)) {
+                    (EFFECT_MIC_INPUT_MUTE, 0) => Ok(Self::SetMicInputMuted { muted: false }),
+                    (EFFECT_MIC_INPUT_MUTE, 1) => Ok(Self::SetMicInputMuted { muted: true }),
+                    _ => Err(ProtocolError::InvalidBody("no such effect parameter")),
+                }
+            }
             (FAMILY_MIC_PARAMS, 0) => {
                 expect_len(body, 16)?;
                 let key = |at: usize| {
@@ -204,6 +246,7 @@ fn expect_len(body: &[u8], expected: usize) -> Result<(), ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Button, ButtonLight};
 
     fn bytes(request: Request) -> (u32, Vec<u8>) {
         (request.command_id(), request.body())
@@ -286,6 +329,30 @@ mod tests {
     }
 
     #[test]
+    fn set_button_lights_sends_one_byte_per_button() {
+        let mut lights = ButtonLights::default();
+        lights.set(Button::Fader1Mute, ButtonLight::Lit);
+        let mut expected = vec![0x02; 24];
+        expected[4] = 0x01;
+        assert_eq!(
+            bytes(Request::SetButtonLights { lights }),
+            (0x0080_8000, expected)
+        );
+    }
+
+    #[test]
+    fn set_mic_input_muted_sends_the_parameter_then_its_value() {
+        assert_eq!(
+            bytes(Request::SetMicInputMuted { muted: true }),
+            (0x0080_1000, vec![0x58, 0x01, 0, 0, 1, 0, 0, 0])
+        );
+        assert_eq!(
+            Request::SetMicInputMuted { muted: false }.body(),
+            [0x58, 0x01, 0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
     fn set_mic_gain_sends_the_type_then_the_gain_of_that_type() {
         let condenser = Request::SetMicGain {
             mic_type: MicType::Condenser,
@@ -354,6 +421,13 @@ mod tests {
                 }
             }
         }
+        for muted in [false, true] {
+            requests.push(Request::SetMicInputMuted { muted });
+        }
+        let mut lights = ButtonLights::default();
+        requests.push(Request::SetButtonLights { lights });
+        lights.set(Button::Bleep, ButtonLight::Lit);
+        requests.push(Request::SetButtonLights { lights });
         for mic_type in MicType::ALL {
             for gain in [0, 72, u16::MAX] {
                 requests.push(Request::SetMicGain { mic_type, gain });
@@ -408,6 +482,11 @@ mod tests {
         invalid(0x0080_9000, &[2]);
         invalid(0x0080_4002, &[0; 21]);
         invalid(0x0080_4002, &[0; 26]);
+        invalid(0x0080_1000, &[0x58, 0x01, 0, 0]);
+        invalid(0x0080_1000, &[0x58, 0x01, 0, 0, 2, 0, 0, 0]);
+        invalid(0x0080_1000, &[0x59, 0x01, 0, 0, 1, 0, 0, 0]); // another effect
+        invalid(0x0080_8000, &[2; 23]);
+        invalid(0x0080_8000, &[9; 24]); // no such light
         invalid(0x0080_b000, &[0; 8]);
         invalid(0x0080_b000, &[0; 16]); // gain key 0 is not a gain
         invalid(

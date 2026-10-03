@@ -41,11 +41,21 @@ export const en = {
   },
   mixer: {
     connecting: 'Connecting…',
-    readOnly: 'Preview: you will be able to move these controls in a later version.',
     fader: 'Fader',
+    source: 'Channel of fader {fader}',
+    mute: 'Mute {channel}',
+    mic: 'Microphone',
+    micHint: 'Like the microphone button of the GoXLR: nobody hears you, whatever the mixer says.',
+    micOff: 'Turn the microphone off',
     muted: 'Muted',
     live: 'Live',
     micLevel: 'Microphone level',
+  },
+  channelList: {
+    hint: 'The volume of every channel, including those that are on no fader.',
+    unknown: 'Unknown',
+    unknownHint:
+      'The GoXLR cannot tell the volume of a channel that is on no fader. It shows here once you set it.',
   },
   device: {
     title: 'Device',

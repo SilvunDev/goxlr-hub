@@ -1,11 +1,12 @@
-//! Keeps the interface up to date with the device: looks for the real GoXLR
-//! every second, asks for the state of the device shown many times a second
-//! and sends it to the window.
+//! Stands between the interface and the device: looks for the real GoXLR
+//! every second, does what the interface asks as soon as it asks, reads the
+//! state of the device shown many times a second and sends it to the window.
 
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use goxlr_hub_core::{Port, Station};
+use goxlr_hub_core::{Intent, Port, Station};
 use goxlr_hub_device::{Device, DeviceError, OpenError, open_hardware};
 use tauri::{AppHandle, Emitter};
 
@@ -31,10 +32,32 @@ impl Port for UsbPort {
     }
 }
 
+/// Where the interface drops what it asks of the device.
+pub struct Intents(pub Sender<Intent>);
+
+/// Does what the interface asks until the next reading is due. Returns
+/// `false` once nobody can ask anything any more.
+fn serve(station: &mut Station<UsbPort>, intents: &Receiver<Intent>, until: Instant) -> bool {
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        match intents.recv_timeout(left) {
+            Ok(intent) => {
+                if let Err(error) = station.apply(intent) {
+                    eprintln!("could not apply {intent:?}: {error}");
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => return true,
+            Err(RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+}
+
 /// Starts reporting the state of the device: the real GoXLR when there is
-/// one to use, the virtual device otherwise.
-pub fn start(app: &AppHandle) -> Result<(), DeviceError> {
+/// one to use, the virtual device otherwise. What is sent through the
+/// returned handle is applied to the device shown.
+pub fn start(app: &AppHandle) -> Result<Intents, DeviceError> {
     let mut station = Station::new(UsbPort)?;
+    let (sender, intents) = mpsc::channel();
 
     let app = app.clone();
     thread::Builder::new()
@@ -61,9 +84,11 @@ pub fn start(app: &AppHandle) -> Result<(), DeviceError> {
                     // The interface keeps showing the last state it received.
                     Err(error) => eprintln!("could not read the device: {error}"),
                 }
-                thread::sleep(POLL_INTERVAL);
+                if !serve(&mut station, &intents, Instant::now() + POLL_INTERVAL) {
+                    return;
+                }
             }
         })
         .map_err(|error| DeviceError::Link(format!("could not start the device feed: {error}")))?;
-    Ok(())
+    Ok(Intents(sender))
 }

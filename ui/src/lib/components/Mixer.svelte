@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { sendIntent } from '../backend';
   import type { Snapshot } from '../device';
   import { i18n } from '../i18n/index.svelte';
   import FaderStrip from './FaderStrip.svelte';
   import MicMeter from './MicMeter.svelte';
+  import MuteButton from './MuteButton.svelte';
 
   let { device }: { device: Snapshot | null } = $props();
 </script>
@@ -10,7 +12,6 @@
 <section class="mixer">
   <h1>{i18n.t.nav.mixer}</h1>
   {#if device}
-    <p class="hint">{i18n.t.mixer.readOnly}</p>
     <div class="board">
       <div class="faders">
         {#each device.faders as view (view.fader)}
@@ -19,6 +20,17 @@
       </div>
       <aside>
         <MicMeter levelDb={device.micLevelDb} />
+        <div class="mic">
+          <div>
+            <strong>{i18n.t.mixer.mic}</strong>
+            <p class="hint">{i18n.t.mixer.micHint}</p>
+          </div>
+          <MuteButton
+            label={i18n.t.mixer.micOff}
+            muted={device.micOff === true}
+            ontoggle={(off) => sendIntent({ type: 'setMicOff', off })}
+          />
+        </div>
         <dl>
           <dt class="label">{i18n.t.device.title}</dt>
           <dd>{i18n.t.device[device.device.kind]}</dd>
@@ -56,6 +68,22 @@
   .faders {
     display: flex;
     gap: 14px;
+  }
+
+  .mic {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .mic strong {
+    font-weight: 600;
+  }
+
+  .mic .hint {
+    font-size: 13px;
+    line-height: 1.4;
   }
 
   aside {

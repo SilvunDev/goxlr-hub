@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { onDeviceState } from './lib/backend';
+  import Channels from './lib/components/Channels.svelte';
   import ComingSoon from './lib/components/ComingSoon.svelte';
   import Header from './lib/components/Header.svelte';
   import Mixer from './lib/components/Mixer.svelte';
@@ -34,6 +35,8 @@
         <Settings />
       {:else if current === 'mixer'}
         <Mixer {device} />
+      {:else if current === 'channels'}
+        <Channels {device} />
       {:else}
         <ComingSoon title={i18n.t.nav[current]} />
       {/if}
