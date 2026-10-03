@@ -2,9 +2,13 @@
 //! draws. The interface never reaches the device: it only receives a
 //! [`Snapshot`].
 
+mod station;
+
 use goxlr_hub_device::{Device, DeviceError, DeviceKind};
 use goxlr_hub_protocol::{Button, Channel, Fader, mic_level_db};
 use serde::Serialize;
+
+pub use station::{Connection, ConnectionView, Port, Station};
 
 /// Faders, volumes and mutes. The device cannot be asked for them, so the
 /// app keeps them and sends them.
@@ -34,6 +38,8 @@ impl Default for MixerState {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    /// Which device is shown, and why.
+    pub connection: ConnectionView,
     pub device: DeviceView,
     pub faders: [FaderView; Fader::COUNT],
     pub channels: Vec<ChannelView>,
@@ -85,6 +91,31 @@ impl Hub {
         Ok(hub)
     }
 
+    /// Takes a real device over without changing how it sounds.
+    ///
+    /// Only the fader assignment is sent, so that the names on screen are
+    /// true; the volumes are then read from the faders. A device that
+    /// dropped and came back also gets the fader volumes it had.
+    pub fn adopt(
+        device: Box<dyn Device>,
+        remembered: Option<&MixerState>,
+    ) -> Result<Self, DeviceError> {
+        let mut hub = Self {
+            device,
+            mixer: remembered.cloned().unwrap_or_default(),
+        };
+        for (fader, channel) in Fader::ALL.into_iter().zip(hub.mixer.faders) {
+            hub.device.set_fader(fader, channel)?;
+        }
+        if remembered.is_some() {
+            for channel in hub.mixer.faders {
+                let volume = hub.mixer.volumes[usize::from(channel.index())];
+                hub.device.set_volume(channel, volume)?;
+            }
+        }
+        Ok(hub)
+    }
+
     fn apply(&mut self) -> Result<(), DeviceError> {
         for (fader, channel) in Fader::ALL.into_iter().zip(self.mixer.faders) {
             self.device.set_fader(fader, channel)?;
@@ -127,7 +158,13 @@ impl Hub {
             view.muted = muted(channel);
         }
 
+        let connection = match info.kind {
+            DeviceKind::Virtual => Connection::Demo,
+            DeviceKind::Hardware => Connection::Hardware,
+        };
+
         Ok(Snapshot {
+            connection: connection.view(),
             device: DeviceView {
                 kind: match info.kind {
                     DeviceKind::Virtual => "virtual",
@@ -225,6 +262,7 @@ mod tests {
         hands.press(Button::MicMute);
         let value = serde_json::to_value(hub.poll().unwrap()).unwrap();
 
+        assert_eq!(value["connection"], json!({ "state": "demo" }));
         assert_eq!(
             value["device"],
             json!({ "kind": "virtual", "firmware": "1.4.3.110", "serial": "VIRTUAL" })

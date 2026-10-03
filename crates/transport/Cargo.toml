@@ -1,0 +1,23 @@
+[package]
+name = "goxlr-hub-transport"
+description = "Carries GoXLR commands to the device: official driver on Windows, libusb elsewhere"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.9"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
+] }
+
+[target.'cfg(not(windows))'.dependencies]
+rusb = "0.9"

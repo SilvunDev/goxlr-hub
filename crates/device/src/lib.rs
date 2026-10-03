@@ -2,14 +2,17 @@
 //!
 //! [`Device`] is what the rest of the app sees. [`Session`] implements it by
 //! speaking the protocol over a [`Link`]. The virtual device is a link that
-//! answers like the firmware would; the USB link plugs in the same way.
+//! answers like the firmware would; the USB link to a real GoXLR plugs in the
+//! same way.
 
+mod hardware;
 mod session;
 mod virtual_device;
 
 use goxlr_hub_protocol::{Channel, Fader, MicType, OutputSet, ProtocolError, RoutingInput, Status};
 use thiserror::Error;
 
+pub use hardware::{HardwareLink, OpenError, open_hardware, rival};
 pub use session::{Link, Session};
 pub use virtual_device::{VirtualGoXlr, VirtualHandle, VirtualState, open_virtual};
 
