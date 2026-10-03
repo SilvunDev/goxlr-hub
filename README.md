@@ -42,4 +42,8 @@ Device protocol knowledge comes from
 
 ## License
 
-To be chosen before the first public release.
+GoXLR Hub is licensed under the
+[GNU General Public License v3.0 or later](LICENSE).
+
+Plugins that only talk to GoXLR Hub through its public plugin interface are
+separate works and may use any license.
