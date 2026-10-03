@@ -31,6 +31,10 @@ jobs:
       - uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: moderate
+          # glib 0.18 `VariantStrIter` unsoundness: pulled in on Linux by
+          # Tauri's GTK 3 bindings, which cannot move to the fixed glib 0.20.
+          # We do not call the affected API. Revisit when Tauri drops GTK 3.
+          allow-ghsas: GHSA-wrw7-89jp-8q8g
 
   secrets:
     runs-on: ubuntu-latest
