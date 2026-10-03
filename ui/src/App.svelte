@@ -4,6 +4,7 @@
   import Channels from './lib/components/Channels.svelte';
   import ComingSoon from './lib/components/ComingSoon.svelte';
   import Header from './lib/components/Header.svelte';
+  import Mic from './lib/components/Mic.svelte';
   import Mixer from './lib/components/Mixer.svelte';
   import Routing from './lib/components/Routing.svelte';
   import Settings from './lib/components/Settings.svelte';
@@ -36,6 +37,8 @@
         <Settings />
       {:else if current === 'mixer'}
         <Mixer {device} />
+      {:else if current === 'mic'}
+        <Mic {device} />
       {:else if current === 'channels'}
         <Channels {device} />
       {:else if current === 'routing'}

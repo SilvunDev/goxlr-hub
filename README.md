@@ -21,14 +21,17 @@ Early development. The app opens, shows its frame in English or French and
 lives in the system tray. It connects to a full-size GoXLR and drives its
 mixer in both directions: volumes, mutes and the channel under each fader are
 set from the screen, and the screen follows the faders and mute buttons of the
-device. The routing grid chooses which source goes to which output.
-Microphone settings and profiles are not there yet. Without a GoXLR it shows a
-built-in virtual device, in demo mode.
+device. The routing grid chooses which source goes to which output. The
+microphone section sets the microphone type and gain, the noise gate, the
+compressor, the equaliser and the de-esser, next to a live level meter.
+Profiles are not there yet. Without a GoXLR it shows a built-in virtual
+device, in demo mode.
 
-When it takes the GoXLR over, the app sends the mutes, the fader assignment
-and the routing, which the device cannot tell: every channel starts live, on
-the default faders (Mic, Chat, Music, System), with a default routing. Volumes
-are left as they are.
+When it takes the GoXLR over, the app sends the mutes, the fader assignment,
+the routing and the microphone processing, which the device cannot tell: every
+channel starts live, on the default faders (Mic, Chat, Music, System), with a
+default routing and a neutral gate, compressor and equaliser. Volumes are left
+as they are, and so are the microphone type and gain until you choose them.
 
 The GoXLR keeps no settings of its own. When it is plugged in again it plays
 with everything open until the app takes it back, a fraction of a second

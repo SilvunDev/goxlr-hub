@@ -2,15 +2,20 @@
 //! draws. The interface never reaches the device: it sends an [`Intent`] and
 //! receives a [`Snapshot`].
 
+mod mic;
 mod station;
 
 use goxlr_hub_device::{Device, DeviceError, DeviceKind};
 use goxlr_hub_protocol::{
-    Button, ButtonLight, ButtonLights, ButtonSet, Channel, Fader, OutputSet, RoutingInput,
-    RoutingOutput, mic_level_db,
+    Button, ButtonLight, ButtonLights, ButtonSet, Channel, EqBand, Fader, MicType, OutputSet,
+    RoutingInput, RoutingOutput, mic_level_db,
 };
 use serde::{Deserialize, Serialize};
 
+pub use mic::{
+    Compressor, CompressorSetting, EqBandView, EqPoint, Gate, GateSetting, MAX_GAIN_DB, MicState,
+    MicView,
+};
 pub use station::{Connection, ConnectionView, Port, Station};
 
 /// The mute button under each fader, left to right.
@@ -111,9 +116,30 @@ impl MixerState {
     }
 }
 
+/// Everything the app sends a device, since the device cannot tell it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Settings {
+    pub mixer: MixerState,
+    pub mic: MicState,
+}
+
+impl Settings {
+    /// The settings of a real device the app meets.
+    pub fn unknown() -> Self {
+        Self {
+            mixer: MixerState::unknown(),
+            mic: MicState::unknown(),
+        }
+    }
+}
+
 /// What the interface asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Intent {
     SetVolume {
         channel: Channel,
@@ -139,6 +165,34 @@ pub enum Intent {
         output: RoutingOutput,
         on: bool,
     },
+    /// Says how the microphone is plugged in. A condenser gets phantom
+    /// power.
+    SetMicType {
+        mic_type: MicType,
+    },
+    /// Sets the gain of the microphone type in use, 0 to 72 dB.
+    SetMicGain {
+        gain: u8,
+    },
+    SetGate {
+        setting: GateSetting,
+        value: i32,
+    },
+    SetCompressor {
+        setting: CompressorSetting,
+        value: i32,
+    },
+    /// Moves a band of the equaliser: its frequency in hertz, its gain in
+    /// decibels.
+    SetEqBand {
+        band: EqBand,
+        frequency: f32,
+        gain: i8,
+    },
+    /// 0 to 100.
+    SetDeEsser {
+        amount: u8,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -157,6 +211,8 @@ pub struct Snapshot {
     pub pressed: Vec<Button>,
     /// Between -72.2 (silence) and 0 (full scale).
     pub mic_level_db: f32,
+    /// How the microphone is plugged in and processed.
+    pub mic: MicView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -205,6 +261,7 @@ struct Travel {
 pub struct Hub {
     device: Box<dyn Device>,
     mixer: MixerState,
+    mic: MicState,
     travels: [Option<Travel>; Fader::COUNT],
     /// The buttons held at the last reading, to tell a press from a hold.
     held: Option<ButtonSet>,
@@ -213,30 +270,39 @@ pub struct Hub {
 impl Hub {
     /// Takes a device over and brings it to the app's state.
     pub fn connect(device: Box<dyn Device>) -> Result<Self, DeviceError> {
-        Self::take(device, MixerState::default())
+        Self::take(
+            device,
+            Settings {
+                mixer: MixerState::default(),
+                mic: MicState::default(),
+            },
+        )
     }
 
     /// Takes a real device over, changing how it sounds as little as the
     /// truth of the screen allows.
     ///
-    /// The fader assignment, the mutes, the routing and the mute lights are
-    /// sent, because the device cannot tell them. Volumes are only sent when the app knows
-    /// them: those of a device that dropped and came back. The others are
-    /// read from the faders, or stay unknown.
+    /// The fader assignment, the mutes, the routing, the microphone
+    /// processing and the mute lights are sent, because the device cannot
+    /// tell them. Volumes, and the type and gain of the microphone, are only
+    /// sent when the app knows them: those of a device that dropped and came
+    /// back, or that were set on screen. The other volumes are read from the
+    /// faders, or stay unknown.
     pub fn adopt(
         device: Box<dyn Device>,
-        remembered: Option<&MixerState>,
+        remembered: Option<&Settings>,
     ) -> Result<Self, DeviceError> {
         Self::take(
             device,
-            remembered.cloned().unwrap_or_else(MixerState::unknown),
+            remembered.cloned().unwrap_or_else(Settings::unknown),
         )
     }
 
-    fn take(device: Box<dyn Device>, mixer: MixerState) -> Result<Self, DeviceError> {
+    fn take(device: Box<dyn Device>, settings: Settings) -> Result<Self, DeviceError> {
         let mut hub = Self {
             device,
-            mixer,
+            mixer: settings.mixer,
+            mic: settings.mic,
             travels: [None; Fader::COUNT],
             held: None,
         };
@@ -260,12 +326,25 @@ impl Hub {
                 hub.send_volume(channel, volume)?;
             }
         }
+        hub.mic.send_all(hub.device.as_mut())?;
         hub.send_lights()?;
         Ok(hub)
     }
 
     pub fn mixer(&self) -> &MixerState {
         &self.mixer
+    }
+
+    pub fn mic(&self) -> &MicState {
+        &self.mic
+    }
+
+    /// What to send the device again, should it drop and come back.
+    pub fn settings(&self) -> Settings {
+        Settings {
+            mixer: self.mixer.clone(),
+            mic: self.mic.clone(),
+        }
     }
 
     /// Does what the interface asked, on the device first.
@@ -280,6 +359,23 @@ impl Hub {
             Intent::SetMicOff { off } => self.set_mic_off(off),
             Intent::AssignFader { fader, channel } => self.assign(fader, channel),
             Intent::SetRoute { input, output, on } => self.set_route(input, output, on),
+            Intent::SetMicType { mic_type } => self.mic.set_type(self.device.as_mut(), mic_type),
+            Intent::SetMicGain { gain } => self.mic.set_gain(self.device.as_mut(), gain),
+            Intent::SetGate { setting, value } => {
+                self.mic.set_gate(self.device.as_mut(), setting, value)
+            }
+            Intent::SetCompressor { setting, value } => {
+                self.mic
+                    .set_compressor(self.device.as_mut(), setting, value)
+            }
+            Intent::SetEqBand {
+                band,
+                frequency,
+                gain,
+            } => self
+                .mic
+                .set_eq_band(self.device.as_mut(), band, frequency, gain),
+            Intent::SetDeEsser { amount } => self.mic.set_de_esser(self.device.as_mut(), amount),
         }
     }
 
@@ -481,6 +577,7 @@ impl Hub {
                 .collect(),
             pressed: status.pressed.iter().collect(),
             mic_level_db: mic_level_db(mic_level),
+            mic: self.mic.view(),
         })
     }
 }
@@ -879,6 +976,20 @@ mod tests {
         ) -> Result<(), DeviceError> {
             self.device.set_mic_gain(mic_type, gain)
         }
+        fn set_effect(
+            &mut self,
+            key: goxlr_hub_protocol::EffectKey,
+            value: i32,
+        ) -> Result<(), DeviceError> {
+            self.device.set_effect(key, value)
+        }
+        fn set_mic_param(
+            &mut self,
+            key: goxlr_hub_protocol::MicParamKey,
+            value: f32,
+        ) -> Result<(), DeviceError> {
+            self.device.set_mic_param(key, value)
+        }
     }
 
     fn lagging() -> (Hub, Positions) {
@@ -998,7 +1109,60 @@ mod tests {
             ),
             route(RoutingInput::LineIn, RoutingOutput::BroadcastMix, false)
         );
+        assert_eq!(
+            read(json!({ "type": "setMicType", "micType": "condenser" })),
+            Intent::SetMicType {
+                mic_type: MicType::Condenser
+            }
+        );
+        assert_eq!(
+            read(json!({ "type": "setMicGain", "gain": 40 })),
+            Intent::SetMicGain { gain: 40 }
+        );
+        assert_eq!(
+            read(json!({ "type": "setGate", "setting": "attenuation", "value": 80 })),
+            Intent::SetGate {
+                setting: GateSetting::Attenuation,
+                value: 80
+            }
+        );
+        assert_eq!(
+            read(json!({ "type": "setCompressor", "setting": "makeupGain", "value": -3 })),
+            Intent::SetCompressor {
+                setting: CompressorSetting::MakeupGain,
+                value: -3
+            }
+        );
+        assert_eq!(
+            read(json!({ "type": "setEqBand", "band": "khz4", "frequency": 3500, "gain": -4 })),
+            Intent::SetEqBand {
+                band: EqBand::Khz4,
+                frequency: 3500.0,
+                gain: -4
+            }
+        );
+        assert_eq!(
+            read(json!({ "type": "setEqBand", "band": "hz31", "frequency": 31.5, "gain": 0 })),
+            Intent::SetEqBand {
+                band: EqBand::Hz31,
+                frequency: 31.5,
+                gain: 0
+            }
+        );
+        assert_eq!(
+            read(json!({ "type": "setDeEsser", "amount": 100 })),
+            Intent::SetDeEsser { amount: 100 }
+        );
         for refused in [
+            json!({ "type": "setMicType", "micType": "ribbon" }),
+            json!({ "type": "setMicGain", "gain": -1 }),
+            json!({ "type": "setGate", "setting": "ratio", "value": 1 }),
+            json!({ "type": "setGate", "setting": "threshold", "value": 1.5 }),
+            json!({ "type": "setCompressor", "setting": "threshold" }),
+            json!({ "type": "setEqBand", "band": "hz90", "frequency": 90, "gain": 0 }),
+            json!({ "type": "setEqBand", "band": "hz31", "frequency": "low", "gain": 0 }),
+            json!({ "type": "setEqBand", "band": "hz31", "frequency": 40, "gain": 200 }),
+            json!({ "type": "setDeEsser", "amount": 256 }),
             json!({ "type": "setRoute", "input": "headphones", "output": "chatMic", "on": true }),
             json!({ "type": "setRoute", "input": "mic", "output": "mic", "on": true }),
             json!({ "type": "setRoute", "input": "mic", "output": "sampler" }),
@@ -1060,6 +1224,106 @@ mod tests {
         assert_eq!(value["pressed"], json!(["micMute"]));
         assert_eq!(value["micOff"], json!(false));
         assert!(value["micLevelDb"].is_number());
+
+        let mic = &value["mic"];
+        assert_eq!(mic["micType"], json!("dynamic"));
+        assert_eq!(mic["gain"], json!(30));
+        assert_eq!(
+            mic["gate"],
+            json!({ "threshold": -30, "attenuation": 100, "attack": 0, "release": 19 })
+        );
+        assert_eq!(
+            mic["compressor"],
+            json!({ "threshold": 0, "ratio": 9, "attack": 1, "release": 9, "makeupGain": 0 })
+        );
+        assert_eq!(mic["equalizer"].as_array().unwrap().len(), 10);
+        assert_eq!(
+            mic["equalizer"][0],
+            json!({
+                "band": "hz31", "frequency": 31.5, "gain": 0,
+                "minFrequency": 30.0, "maxFrequency": 63.0
+            })
+        );
+        assert_eq!(
+            mic["equalizer"][5],
+            json!({
+                "band": "khz1", "frequency": 1000.0, "gain": 0,
+                "minFrequency": 500.0, "maxFrequency": 2000.0
+            })
+        );
+        assert_eq!(mic["deEsser"], json!(0));
+    }
+
+    #[test]
+    fn a_microphone_nobody_described_is_shown_as_unknown() {
+        let (device, hands) = open_virtual().unwrap();
+        let mut hub = Hub::adopt(Box::new(device), None).unwrap();
+        // The processing was sent, the type and the gain were not.
+        assert!(!hands.state().mic_gain_set);
+        assert_eq!(hands.state().effects.len(), 33);
+
+        hub.apply(Intent::SetMicGain { gain: 50 }).unwrap();
+        assert!(!hands.state().mic_gain_set);
+        let value = serde_json::to_value(hub.poll().unwrap()).unwrap();
+        assert_eq!(value["mic"]["micType"], json!(null));
+        assert_eq!(value["mic"]["gain"], json!(null));
+
+        hub.apply(Intent::SetMicType {
+            mic_type: MicType::Jack,
+        })
+        .unwrap();
+        hub.apply(Intent::SetMicGain { gain: 12 }).unwrap();
+        let state = hands.state();
+        assert_eq!((state.mic_type, state.mic_gain), (MicType::Jack, 12));
+        let snapshot = hub.poll().unwrap();
+        assert_eq!(snapshot.mic.mic_type, Some(MicType::Jack));
+        assert_eq!(snapshot.mic.gain, Some(12));
+    }
+
+    #[test]
+    fn what_the_screen_asks_of_the_microphone_reaches_the_device_and_the_picture() {
+        use goxlr_hub_protocol::{EffectKey, MicParamKey};
+
+        let (mut hub, hands) = hub();
+        for intent in [
+            Intent::SetGate {
+                setting: GateSetting::Threshold,
+                value: -40,
+            },
+            Intent::SetCompressor {
+                setting: CompressorSetting::Ratio,
+                value: 11,
+            },
+            Intent::SetEqBand {
+                band: EqBand::Hz125,
+                frequency: 150.0,
+                gain: 4,
+            },
+            Intent::SetDeEsser { amount: 25 },
+        ] {
+            hub.apply(intent).unwrap();
+        }
+
+        let device = hands.state();
+        assert_eq!(device.effects[&EffectKey::GateThreshold], -40);
+        assert_eq!(device.mic_params[&MicParamKey::GateThreshold], -40.0);
+        assert_eq!(device.effects[&EffectKey::CompressorRatio], 11);
+        assert_eq!(device.mic_params[&MicParamKey::CompressorRatio], 8.0);
+        assert_eq!(device.effects[&EffectKey::EqFrequency(EqBand::Hz125)], 70);
+        assert_eq!(device.effects[&EffectKey::EqGain(EqBand::Hz125)], 4);
+        assert_eq!(device.effects[&EffectKey::DeEsser], 25);
+
+        let mic = hub.poll().unwrap().mic;
+        assert_eq!(mic.gate.threshold, -40);
+        assert_eq!(mic.compressor.ratio, 11);
+        assert_eq!(
+            (mic.equalizer[2].frequency, mic.equalizer[2].gain),
+            (150.0, 4)
+        );
+        // The neighbours of the band that moved can now go as far as it.
+        assert_eq!(mic.equalizer[1].max_frequency, 150.0);
+        assert_eq!(mic.equalizer[3].min_frequency, 150.0);
+        assert_eq!(mic.de_esser, 25);
     }
 
     #[test]
@@ -1101,6 +1365,20 @@ mod tests {
                 &mut self,
                 _: goxlr_hub_protocol::MicType,
                 _: u16,
+            ) -> Result<(), DeviceError> {
+                Ok(())
+            }
+            fn set_effect(
+                &mut self,
+                _: goxlr_hub_protocol::EffectKey,
+                _: i32,
+            ) -> Result<(), DeviceError> {
+                Ok(())
+            }
+            fn set_mic_param(
+                &mut self,
+                _: goxlr_hub_protocol::MicParamKey,
+                _: f32,
             ) -> Result<(), DeviceError> {
                 Ok(())
             }

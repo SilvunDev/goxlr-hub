@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
-import type { ChannelId, FaderId, Snapshot } from './lib/device';
+import type { ChannelId, FaderId, MicView, Snapshot } from './lib/device';
 import { i18n } from './lib/i18n/index.svelte';
 
 // Stands in for the Rust side: `feed.push` plays the device reporting its state.
@@ -22,6 +22,36 @@ vi.mock('./lib/backend', () => ({
     return () => {};
   },
 }));
+
+function mic(overrides: Partial<MicView> = {}): MicView {
+  const band = (id: string, frequency: number, minFrequency: number, maxFrequency: number) => ({
+    band: id as MicView['equalizer'][number]['band'],
+    frequency,
+    gain: 0,
+    minFrequency,
+    maxFrequency,
+  });
+  return {
+    micType: 'dynamic',
+    gain: 30,
+    gate: { threshold: -30, attenuation: 100, attack: 0, release: 19 },
+    compressor: { threshold: 0, ratio: 9, attack: 1, release: 9, makeupGain: 0 },
+    equalizer: [
+      band('hz31', 31.5, 30, 63),
+      band('hz63', 63, 31.5, 125),
+      band('hz125', 125, 63, 250),
+      band('hz250', 250, 125, 300),
+      band('hz500', 500, 300, 1000),
+      band('khz1', 1000, 500, 2000),
+      band('khz2', 2000, 1000, 2000),
+      band('khz4', 4000, 2000, 8000),
+      band('khz8', 8000, 4000, 16000),
+      band('khz16', 16000, 8000, 18000),
+    ],
+    deEsser: 0,
+    ...overrides,
+  };
+}
 
 function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
   const fader = (id: FaderId, channel: ChannelId, volume: number, muted = false) => ({
@@ -54,6 +84,7 @@ function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     ],
     pressed: [],
     micLevelDb: -23.44,
+    mic: mic(),
     ...overrides,
   };
 }
@@ -507,6 +538,210 @@ describe('App', () => {
       expect(cell('Musique vers Casque').getAttribute('aria-checked')).toBe('true');
       expect(screen.getByRole('columnheader', { name: /Mix de diffusion/ })).toBeTruthy();
       expect(screen.getByRole('columnheader', { name: /Micro du chat/ })).toBeTruthy();
+    });
+  });
+
+  describe('on the microphone section', () => {
+    async function open(state: unknown = snapshot()) {
+      render(App);
+      await report(state);
+      await fireEvent.click(screen.getByRole('button', { name: 'Microphone' }));
+    }
+    const slider = (name: string) => screen.getByRole('slider', { name }) as HTMLInputElement;
+    const radio = (name: string) => screen.getByRole('radio', { name });
+    async function set(name: string, value: number) {
+      await fireEvent.input(slider(name), { target: { value: String(value) } });
+    }
+
+    it('shows the level meter and every part of the processing', async () => {
+      await open();
+      expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Microphone');
+      expect(screen.getByRole('meter').getAttribute('aria-valuetext')).toBe('-23.4 dB');
+      expect(
+        screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
+      ).toEqual(['Input', 'Noise gate', 'Compressor', 'Equaliser', 'De-esser']);
+      expect(screen.getAllByRole('radio')).toHaveLength(3);
+      expect(screen.queryByText('Coming soon')).toBeNull();
+    });
+
+    it('says the type and the gain of the microphone', async () => {
+      await open();
+      expect(radio('Dynamic').getAttribute('aria-checked')).toBe('true');
+      expect(radio('Condenser').getAttribute('aria-checked')).toBe('false');
+      expect(slider('Gain').value).toBe('30');
+      expect(slider('Gain').getAttribute('aria-valuetext')).toBe('30 dB');
+      expect(screen.queryByText(/48 V/)).toBeNull();
+      expect(screen.queryByText(/Choose your microphone type/)).toBeNull();
+    });
+
+    it('asks for the microphone type before anything is sent to it', async () => {
+      await open(snapshot({ mic: mic({ micType: null, gain: null }) }));
+      for (const name of ['Dynamic', 'Condenser', '3.5 mm jack']) {
+        expect(radio(name).getAttribute('aria-checked')).toBe('false');
+      }
+      expect(screen.getByText(/Choose your microphone type/)).toBeTruthy();
+      expect(slider('Gain').disabled).toBe(true);
+      await set('Gain', 40);
+      expect(feed.sent).toEqual([]);
+
+      await fireEvent.click(radio('3.5 mm jack'));
+      expect(feed.sent).toEqual([{ type: 'setMicType', micType: 'jack' }]);
+      // The screen waits for the device to say so.
+      expect(radio('3.5 mm jack').getAttribute('aria-checked')).toBe('false');
+    });
+
+    it('warns that a condenser gets phantom power', async () => {
+      await open(snapshot({ mic: mic({ micType: 'condenser', gain: 12 }) }));
+      expect(radio('Condenser').getAttribute('aria-checked')).toBe('true');
+      expect(screen.getByText(/48 V phantom power/)).toBeTruthy();
+    });
+
+    it('sets the gain within what the preamp gives', async () => {
+      await open();
+      expect(slider('Gain').max).toBe('72');
+      await set('Gain', 45);
+      // The slider itself stops at its ends.
+      await set('Gain', 73);
+      expect(feed.sent).toEqual([
+        { type: 'setMicGain', gain: 45 },
+        { type: 'setMicGain', gain: 72 },
+      ]);
+    });
+
+    it('sets the gate, and tells times in milliseconds', async () => {
+      await open();
+      expect(slider('Noise gate: Threshold').getAttribute('aria-valuetext')).toBe('-30 dB');
+      expect(slider('Noise gate: Attenuation').getAttribute('aria-valuetext')).toBe('100%');
+      expect(slider('Noise gate: Attack').getAttribute('aria-valuetext')).toBe('10 ms');
+      expect(slider('Noise gate: Release').getAttribute('aria-valuetext')).toBe('200 ms');
+
+      await set('Noise gate: Threshold', -45);
+      await set('Noise gate: Attenuation', 60);
+      await set('Noise gate: Attack', 3);
+      await set('Noise gate: Release', 45);
+      expect(feed.sent).toEqual([
+        { type: 'setGate', setting: 'threshold', value: -45 },
+        { type: 'setGate', setting: 'attenuation', value: 60 },
+        { type: 'setGate', setting: 'attack', value: 3 },
+        { type: 'setGate', setting: 'release', value: 45 },
+      ]);
+      // Shown at once, before the device confirms.
+      expect(slider('Noise gate: Release').getAttribute('aria-valuetext')).toBe('2000 ms');
+    });
+
+    it('sets the compressor, and tells the ratio as a ratio', async () => {
+      await open();
+      expect(slider('Compressor: Ratio').getAttribute('aria-valuetext')).toBe('4:1');
+      expect(slider('Compressor: Attack').getAttribute('aria-valuetext')).toBe('2 ms');
+      expect(slider('Compressor: Release').getAttribute('aria-valuetext')).toBe('100 ms');
+      expect(slider('Compressor: Make-up gain').getAttribute('aria-valuetext')).toBe('0 dB');
+
+      await set('Compressor: Threshold', -20);
+      await set('Compressor: Ratio', 7);
+      await set('Compressor: Attack', 19);
+      await set('Compressor: Release', 0);
+      await set('Compressor: Make-up gain', 6);
+      expect(feed.sent).toEqual([
+        { type: 'setCompressor', setting: 'threshold', value: -20 },
+        { type: 'setCompressor', setting: 'ratio', value: 7 },
+        { type: 'setCompressor', setting: 'attack', value: 19 },
+        { type: 'setCompressor', setting: 'release', value: 0 },
+        { type: 'setCompressor', setting: 'makeupGain', value: 6 },
+      ]);
+      expect(slider('Compressor: Ratio').getAttribute('aria-valuetext')).toBe('2.5:1');
+    });
+
+    it('sets the de-esser', async () => {
+      await open(snapshot({ mic: mic({ deEsser: 20 }) }));
+      expect(slider('De-esser: Amount').value).toBe('20');
+      await set('De-esser: Amount', 55);
+      expect(feed.sent).toEqual([{ type: 'setDeEsser', amount: 55 }]);
+    });
+
+    it('draws one point per band of the equaliser', async () => {
+      const state = mic();
+      state.equalizer[5].gain = 4;
+      await open(snapshot({ mic: state }));
+      const points = screen.getAllByRole('slider', { name: /Equaliser band/ });
+      expect(points).toHaveLength(10);
+      expect(points[0].getAttribute('aria-valuetext')).toBe('31.5 Hz, 0 dB');
+      expect(points[5].getAttribute('aria-valuetext')).toBe('1000 Hz, +4 dB');
+      expect(points[5].getAttribute('aria-valuenow')).toBe('4');
+      expect(points[9].getAttribute('aria-valuetext')).toBe('16000 Hz, 0 dB');
+    });
+
+    it('moves a band of the equaliser with the arrow keys', async () => {
+      await open();
+      const point = screen.getByRole('slider', { name: 'Equaliser band 6' });
+      await fireEvent.keyDown(point, { key: 'ArrowUp' });
+      expect(feed.sent).toEqual([{ type: 'setEqBand', band: 'khz1', frequency: 1000, gain: 1 }]);
+      // Shown at once: the next key starts from there.
+      expect(point.getAttribute('aria-valuetext')).toBe('1000 Hz, +1 dB');
+      await fireEvent.keyDown(point, { key: 'ArrowRight' });
+      await fireEvent.keyDown(point, { key: 'ArrowDown' });
+      await fireEvent.keyDown(point, { key: 'ArrowDown' });
+      await fireEvent.keyDown(point, { key: 'ArrowLeft' });
+      expect(feed.sent.slice(1)).toEqual([
+        { type: 'setEqBand', band: 'khz1', frequency: 1030, gain: 1 },
+        { type: 'setEqBand', band: 'khz1', frequency: 1030, gain: 0 },
+        { type: 'setEqBand', band: 'khz1', frequency: 1030, gain: -1 },
+        { type: 'setEqBand', band: 'khz1', frequency: 1000, gain: -1 },
+      ]);
+      await fireEvent.keyDown(point, { key: 'a' });
+      expect(feed.sent).toHaveLength(5);
+    });
+
+    it('keeps a band within its gain and between its neighbours', async () => {
+      const state = mic();
+      state.equalizer[6] = { ...state.equalizer[6], gain: 9 };
+      state.equalizer[0] = { ...state.equalizer[0], frequency: 30, gain: -9 };
+      await open(snapshot({ mic: state }));
+
+      // 2 kHz already sits at the end of its range, and at full gain.
+      const top = screen.getByRole('slider', { name: 'Equaliser band 7' });
+      await fireEvent.keyDown(top, { key: 'ArrowUp' });
+      await fireEvent.keyDown(top, { key: 'ArrowRight' });
+      const bottom = screen.getByRole('slider', { name: 'Equaliser band 1' });
+      await fireEvent.keyDown(bottom, { key: 'ArrowDown' });
+      await fireEvent.keyDown(bottom, { key: 'ArrowLeft' });
+      expect(feed.sent).toEqual([]);
+    });
+
+    it('follows the device when it changes', async () => {
+      await open();
+      const state = mic();
+      state.gate.threshold = -12;
+      state.equalizer[2] = { ...state.equalizer[2], frequency: 180, gain: -3 };
+      await report(snapshot({ mic: state }));
+      expect(slider('Noise gate: Threshold').value).toBe('-12');
+      expect(
+        screen.getByRole('slider', { name: 'Equaliser band 3' }).getAttribute('aria-valuetext'),
+      ).toBe('180 Hz, -3 dB');
+    });
+
+    it('waits for the device, and for a device that tells its microphone', async () => {
+      render(App);
+      await fireEvent.click(screen.getByRole('button', { name: 'Microphone' }));
+      expect(screen.getByText('Connecting…')).toBeTruthy();
+
+      const { mic: _, ...old } = snapshot();
+      await report(old);
+      expect(screen.getByText('Connecting…')).toBeTruthy();
+      expect(screen.queryByRole('slider')).toBeNull();
+    });
+
+    it('speaks French too', async () => {
+      await open(snapshot({ mic: mic({ micType: 'condenser', gain: 12 }) }));
+      i18n.setLocale('fr');
+      await tick();
+      expect(radio('Condensateur').getAttribute('aria-checked')).toBe('true');
+      expect(screen.getByText(/alimentation fantôme 48 V/)).toBeTruthy();
+      expect(slider('Compresseur : Gain de rattrapage')).toBeTruthy();
+      expect(slider('Compresseur : Ratio').getAttribute('aria-valuetext')).toBe('4:1');
+      expect(screen.getByRole('slider', { name: 'Bande 1 de l’égaliseur' })).toBeTruthy();
+      expect(
+        screen.getByRole('slider', { name: 'Bande 1 de l’égaliseur' }).getAttribute('aria-valuetext'),
+      ).toBe('31,5 Hz, 0 dB');
     });
   });
 
