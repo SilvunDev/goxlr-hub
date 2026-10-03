@@ -17,12 +17,17 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
 }
 
 $saved = Get-Content $backup -Raw | ConvertFrom-Json
-$fx = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$($saved.device)\FxProperties"
+# Administrators may only set values on this key: open it with exactly that right.
+$fx = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+    "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$($saved.device)\FxProperties",
+    [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+    [System.Security.AccessControl.RegistryRights]'QueryValues, SetValue')
 if ($null -eq $saved.original) {
-    Remove-ItemProperty $fx -Name $saved.valueName -ErrorAction SilentlyContinue
+    $fx.DeleteValue($saved.valueName, $false)
 } else {
-    Set-ItemProperty $fx -Name $saved.valueName -Value $saved.original -Type String
+    $fx.SetValue($saved.valueName, $saved.original, [Microsoft.Win32.RegistryValueKind]::String)
 }
+$fx.Close()
 
 Remove-Item "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$clsid" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item "HKLM:\SOFTWARE\Classes\CLSID\$clsid" -Recurse -Force -ErrorAction SilentlyContinue

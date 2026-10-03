@@ -30,19 +30,26 @@ $interface = (Get-Item "$device\Properties").GetValue('{b3f8fa53-0004-438e-9003-
 if ($interface -notmatch 'GoXLR') { Stop-WithMessage "That output is not a GoXLR output ($interface)." }
 if ((Get-Item $device).GetValue('DeviceState') -ne 1) { Stop-WithMessage 'That output is not active.' }
 if (-not (Test-Path $dll)) { Stop-WithMessage 'Build first: run build.ps1.' }
-if (Test-Path $backup) { Stop-WithMessage 'Already installed. Run uninstall.ps1 first.' }
+$saved = if (Test-Path $backup) { Get-Content $backup -Raw | ConvertFrom-Json }
+if ($saved -and ($saved.device -ne "{$parsed}" -or $saved.valueName -ne $valueName)) {
+    Stop-WithMessage 'Already attached elsewhere. Run uninstall.ps1 first.'
+}
 
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Stop-WithMessage 'Run this script as administrator.'
 }
 
-# 1. Backup, before anything is written.
-$fx = Get-Item "$device\FxProperties"
-$original = $fx.GetValue($valueName)
-New-Item -ItemType Directory -Force $dataDir | Out-Null
-@{ device = "{$parsed}"; valueName = $valueName; original = $original } |
-    ConvertTo-Json | Set-Content -Encoding utf8 $backup
+# 1. Backup, before anything is written. A second run keeps the first backup,
+#    so the original value is never replaced by our own id.
+if ($saved) {
+    $original = $saved.original
+} else {
+    $original = (Get-Item "$device\FxProperties").GetValue($valueName)
+    New-Item -ItemType Directory -Force $dataDir | Out-Null
+    @{ device = "{$parsed}"; valueName = $valueName; original = $original } |
+        ConvertTo-Json | Set-Content -Encoding utf8 $backup
+}
 
 # 2. The module itself, where the audio engine process can read it.
 New-Item -ItemType Directory -Force $installDir | Out-Null
@@ -70,8 +77,14 @@ foreach ($name in $numbers.Keys) {
     Set-ItemProperty $apo -Name $name -Value $numbers[$name] -Type DWord
 }
 
-# 5. Attach to the output.
-Set-ItemProperty "$device\FxProperties" -Name $valueName -Value $clsid -Type String
+# 5. Attach to the output. Administrators may only set values on this key, so
+#    it is opened with exactly that right: asking for more is refused.
+$fx = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+    "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\{$parsed}\FxProperties",
+    [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+    [System.Security.AccessControl.RegistryRights]'QueryValues, SetValue')
+$fx.SetValue($valueName, $clsid, [Microsoft.Win32.RegistryValueKind]::String)
+$fx.Close()
 
 # 6. The audio engine reads effects when it starts.
 Restart-Service Audiosrv -Force
