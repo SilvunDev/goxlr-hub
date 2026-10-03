@@ -263,6 +263,20 @@ impl OutputSet {
         self.0 |= 1 << output as u8;
     }
 
+    pub fn remove(&mut self, output: RoutingOutput) {
+        self.0 &= !(1 << output as u8);
+    }
+
+    /// The same set, with one output put in or taken out.
+    pub fn with(mut self, output: RoutingOutput, on: bool) -> Self {
+        if on {
+            self.insert(output);
+        } else {
+            self.remove(output);
+        }
+        self
+    }
+
     pub fn iter(self) -> impl Iterator<Item = RoutingOutput> {
         RoutingOutput::ALL
             .into_iter()
@@ -342,6 +356,25 @@ mod tests {
         }
         assert_eq!(RoutingInput::from_id(0x01), None);
         assert_eq!(RoutingInput::from_id(0x12), None);
+    }
+
+    #[test]
+    fn an_output_leaves_a_set_without_taking_the_others() {
+        let mut set = OutputSet::of(&[RoutingOutput::Headphones, RoutingOutput::LineOut]);
+        set.remove(RoutingOutput::Headphones);
+        set.remove(RoutingOutput::Sampler);
+        assert_eq!(set, OutputSet::of(&[RoutingOutput::LineOut]));
+
+        let set = set.with(RoutingOutput::ChatMic, true);
+        assert_eq!(
+            set.iter().collect::<Vec<_>>(),
+            [RoutingOutput::ChatMic, RoutingOutput::LineOut]
+        );
+        assert_eq!(set.with(RoutingOutput::ChatMic, true), set);
+        let set = set
+            .with(RoutingOutput::ChatMic, false)
+            .with(RoutingOutput::LineOut, false);
+        assert_eq!(set, OutputSet::default());
     }
 
     #[test]

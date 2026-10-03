@@ -79,8 +79,15 @@ impl<P: Port> Station<P> {
         &self.connection
     }
 
+    /// A real device dropped and is expected back. Until the app has it
+    /// again it plays with its own settings, so it is worth looking for it
+    /// more often.
+    pub fn awaits_return(&self) -> bool {
+        self.remembered.is_some() && self.connection == Connection::Demo
+    }
+
     /// Looks for the real device, or checks that it is still ours. Meant to
-    /// be called about once a second.
+    /// be called about once a second, more often while a device is awaited.
     pub fn scan(&mut self) {
         if self.hardware.is_some() {
             // Two programs driving the device steal each other's answers:
@@ -170,7 +177,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use goxlr_hub_device::{DeviceKind, Link, Session, VirtualGoXlr, VirtualHandle};
-    use goxlr_hub_protocol::{Button, ButtonLight, ButtonLights, Channel, Fader, Packet, Request};
+    use goxlr_hub_protocol::{
+        Button, ButtonLight, ButtonLights, Channel, Fader, OutputSet, Packet, Request,
+        RoutingInput, RoutingOutput, Side,
+    };
     use serde_json::json;
 
     use super::*;
@@ -323,8 +333,19 @@ mod tests {
         station.poll().unwrap();
 
         let settings = bench.settings_received();
+        // What silences comes first: until then the device plays as it
+        // pleases.
+        assert!(
+            settings[..16]
+                .iter()
+                .all(|request| matches!(request, Request::SetRouting { .. }))
+        );
+        assert!(settings[16..28].iter().all(|request| matches!(
+            request,
+            Request::SetMuted { .. } | Request::SetMicInputMuted { .. }
+        )));
         assert_eq!(
-            settings[..4],
+            settings[28..32],
             [
                 (Fader::A, Channel::Mic),
                 (Fader::B, Channel::Chat),
@@ -344,7 +365,78 @@ mod tests {
         );
         assert_eq!(bench.volumes_received(), []);
         assert!(settings.contains(&Request::SetMicInputMuted { muted: false }));
-        assert_eq!(settings.len(), 4 + 11 + 1 + 1);
+        let routes: Vec<Request> = settings
+            .iter()
+            .copied()
+            .filter(|request| matches!(request, Request::SetRouting { .. }))
+            .collect();
+        assert_eq!(routes.len(), 16, "eight inputs, two sides each");
+        assert!(routes.contains(&Request::SetRouting {
+            input: RoutingInput::Mic,
+            side: Side::Right,
+            outputs: OutputSet::of(&[RoutingOutput::BroadcastMix, RoutingOutput::ChatMic]),
+        }));
+        assert_eq!(settings.len(), 4 + 11 + 1 + 16 + 1);
+    }
+
+    fn routed(bench: &Bench, input: RoutingInput) -> OutputSet {
+        let device = bench.hands.state();
+        assert_eq!(
+            device.routed(input, Side::Left),
+            device.routed(input, Side::Right)
+        );
+        device.routed(input, Side::Left)
+    }
+
+    #[test]
+    fn the_routing_goes_to_the_real_device_and_comes_back_with_it() {
+        let (first, before) = real_device();
+        let (second, after) = real_device();
+        let (mut station, _) = station([Ok(first), Ok(second)]);
+        station.scan();
+        station.poll().unwrap();
+        for (input, output, on) in [
+            (RoutingInput::Mic, RoutingOutput::Headphones, true),
+            (RoutingInput::System, RoutingOutput::LineOut, false),
+        ] {
+            station
+                .apply(Intent::SetRoute { input, output, on })
+                .unwrap();
+        }
+        let mic = OutputSet::of(&[
+            RoutingOutput::Headphones,
+            RoutingOutput::BroadcastMix,
+            RoutingOutput::ChatMic,
+        ]);
+        let system = OutputSet::of(&[RoutingOutput::Headphones, RoutingOutput::BroadcastMix]);
+        assert_eq!(routed(&before, RoutingInput::Mic), mic);
+        assert_eq!(routed(&before, RoutingInput::System), system);
+
+        // Unplugged in the middle of a change: no crash, the demo mode.
+        before.unplugged.store(true, Ordering::Relaxed);
+        station
+            .apply(Intent::SetRoute {
+                input: RoutingInput::Game,
+                output: RoutingOutput::Headphones,
+                on: false,
+            })
+            .unwrap();
+        assert_eq!(station.connection(), &Connection::Demo);
+        assert_eq!(station.poll().unwrap().device.kind, "virtual");
+
+        station.scan();
+        assert_eq!(station.connection(), &Connection::Hardware);
+        assert_eq!(routed(&after, RoutingInput::Mic), mic);
+        assert_eq!(routed(&after, RoutingInput::System), system);
+        // The change the device never received was not kept.
+        assert_eq!(
+            routed(&after, RoutingInput::Game),
+            crate::default_routing()[RoutingInput::Game as usize]
+        );
+        assert_eq!(
+            station.poll().unwrap().routing[RoutingInput::Mic as usize].outputs,
+            mic.iter().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -414,6 +506,30 @@ mod tests {
         // Still unplugged: nothing to open.
         station.scan();
         assert_eq!(station.poll().unwrap().connection.state, "demo");
+    }
+
+    #[test]
+    fn a_device_that_dropped_is_awaited_until_it_is_back() {
+        let (first, before) = real_device();
+        let (second, _) = real_device();
+        let (mut station, rival) = station([Ok(first), Err(OpenError::Absent), Ok(second)]);
+        assert!(!station.awaits_return(), "nothing was ever plugged in");
+        station.scan();
+        station.poll().unwrap();
+        assert!(!station.awaits_return());
+
+        before.unplugged.store(true, Ordering::Relaxed);
+        station.poll().unwrap();
+        assert!(station.awaits_return());
+        station.scan();
+        assert!(station.awaits_return(), "still unplugged");
+        station.scan();
+        assert!(!station.awaits_return(), "it is back");
+
+        // A rival is not hurried: it leaves when the user closes it.
+        *rival.lock().unwrap() = Some("GoXLR Utility".into());
+        station.scan();
+        assert!(!station.awaits_return());
     }
 
     #[test]
@@ -499,6 +615,13 @@ mod tests {
                 muted: true,
             })
             .unwrap();
+        station
+            .apply(Intent::SetRoute {
+                input: RoutingInput::Music,
+                output: RoutingOutput::Headphones,
+                on: false,
+            })
+            .unwrap();
 
         *rival.lock().unwrap() = Some("GoXLR Utility".into());
         station.scan();
@@ -510,13 +633,17 @@ mod tests {
         );
         assert_eq!(station.poll().unwrap().device.kind, "virtual");
 
-        // Once the rival is gone the device comes back with the mutes of the
-        // app, and the volumes the rival left.
+        // Once the rival is gone the device comes back with the mutes and the
+        // routing of the app, and the volumes the rival left.
         *rival.lock().unwrap() = None;
         station.scan();
         assert_eq!(station.connection(), &Connection::Hardware);
         assert!(after.mutes_received().contains(&(Channel::Music, true)));
         assert_eq!(after.volumes_received(), []);
+        assert_eq!(
+            routed(&after, RoutingInput::Music),
+            OutputSet::of(&[RoutingOutput::BroadcastMix, RoutingOutput::LineOut])
+        );
     }
 
     #[test]

@@ -58,6 +58,38 @@ export const fr: Messages = {
     unknownHint:
       'La GoXLR ne sait pas dire le volume d’une piste qui n’est sur aucun fader. Il s’affiche ici dès que vous le réglez.',
   },
+  routing: {
+    hint: 'Cochez où va chaque source. La GoXLR suit tout de suite.',
+    source: 'Source',
+    route: '{input} vers {output}',
+    monitorHint:
+      'Vous entendez votre micro dans le casque seulement si le volume Retour micro est monté. Réglez-le dans Pistes audio.',
+    loopHint: 'Un tiret marque une route qui renverrait un son là d’où il vient.',
+    inputs: {
+      mic: 'Micro',
+      chat: 'Chat',
+      music: 'Musique',
+      game: 'Jeu',
+      console: 'Console',
+      lineIn: 'Entrée ligne',
+      system: 'Système',
+      samples: 'Samples',
+    },
+    outputs: {
+      headphones: 'Casque',
+      broadcastMix: 'Mix de diffusion',
+      lineOut: 'Sortie ligne',
+      chatMic: 'Micro du chat',
+      sampler: 'Sampler',
+    },
+    outputHints: {
+      headphones: 'Ce que vous entendez.',
+      broadcastMix: 'Ce que reçoit votre stream ou votre enregistrement.',
+      lineOut: 'La sortie ligne à l’arrière de la GoXLR.',
+      chatMic: 'Ce qu’entendent les personnes de votre chat vocal.',
+      sampler: 'Ce que le sampler enregistre.',
+    },
+  },
   device: {
     title: 'Appareil',
     virtual: 'GoXLR virtuelle',

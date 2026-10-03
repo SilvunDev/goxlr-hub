@@ -5,6 +5,7 @@
   import ComingSoon from './lib/components/ComingSoon.svelte';
   import Header from './lib/components/Header.svelte';
   import Mixer from './lib/components/Mixer.svelte';
+  import Routing from './lib/components/Routing.svelte';
   import Settings from './lib/components/Settings.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
   import StatusBanner from './lib/components/StatusBanner.svelte';
@@ -37,6 +38,8 @@
         <Mixer {device} />
       {:else if current === 'channels'}
         <Channels {device} />
+      {:else if current === 'routing'}
+        <Routing {device} />
       {:else}
         <ComingSoon title={i18n.t.nav[current]} />
       {/if}

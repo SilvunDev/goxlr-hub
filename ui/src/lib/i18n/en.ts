@@ -57,6 +57,38 @@ export const en = {
     unknownHint:
       'The GoXLR cannot tell the volume of a channel that is on no fader. It shows here once you set it.',
   },
+  routing: {
+    hint: 'Tick where each source is sent. The GoXLR follows at once.',
+    source: 'Source',
+    route: '{input} to {output}',
+    monitorHint:
+      'You hear your microphone in the headphones only when the Mic Monitor volume is up. Set it in Channels.',
+    loopHint: 'A dash marks a route that would send a sound back to where it comes from.',
+    inputs: {
+      mic: 'Mic',
+      chat: 'Chat',
+      music: 'Music',
+      game: 'Game',
+      console: 'Console',
+      lineIn: 'Line In',
+      system: 'System',
+      samples: 'Samples',
+    },
+    outputs: {
+      headphones: 'Headphones',
+      broadcastMix: 'Broadcast Mix',
+      lineOut: 'Line Out',
+      chatMic: 'Chat Mic',
+      sampler: 'Sampler',
+    },
+    outputHints: {
+      headphones: 'What you hear.',
+      broadcastMix: 'What your stream or your recording gets.',
+      lineOut: 'The line output at the back of the GoXLR.',
+      chatMic: 'What the people in your voice chat hear.',
+      sampler: 'What the sampler records.',
+    },
+  },
   device: {
     title: 'Device',
     virtual: 'Virtual GoXLR',

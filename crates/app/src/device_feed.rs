@@ -19,6 +19,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How often the real GoXLR is looked for, and rival programs checked.
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How often a GoXLR that dropped is looked for: until the app has it
+/// again, it plays with its own settings.
+const RETURN_SCAN_INTERVAL: Duration = Duration::from_millis(50);
+
 /// The USB port of the computer.
 struct UsbPort;
 
@@ -66,7 +70,12 @@ pub fn start(app: &AppHandle) -> Result<Intents, DeviceError> {
             let mut scanned: Option<Instant> = None;
             let mut reported = station.connection().clone();
             loop {
-                if scanned.is_none_or(|at| at.elapsed() >= SCAN_INTERVAL) {
+                let interval = if station.awaits_return() {
+                    RETURN_SCAN_INTERVAL
+                } else {
+                    SCAN_INTERVAL
+                };
+                if scanned.is_none_or(|at| at.elapsed() >= interval) {
                     station.scan();
                     scanned = Some(Instant::now());
                 }

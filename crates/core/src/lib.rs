@@ -6,7 +6,8 @@ mod station;
 
 use goxlr_hub_device::{Device, DeviceError, DeviceKind};
 use goxlr_hub_protocol::{
-    Button, ButtonLight, ButtonLights, ButtonSet, Channel, Fader, mic_level_db,
+    Button, ButtonLight, ButtonLights, ButtonSet, Channel, Fader, OutputSet, RoutingInput,
+    RoutingOutput, mic_level_db,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,8 +28,31 @@ const FADER_TOLERANCE: u8 = 5;
 /// a second.
 const FADER_TRAVEL_READINGS: u8 = 20;
 
-/// Faders, volumes and mutes. The device cannot be asked for them, so the
-/// app keeps them and sends them.
+/// The routing of a device the app meets: everything is heard in the
+/// headphones, on the stream and on the line output, the microphone goes to
+/// the stream and to the voice chat, and the samples are played to the voice
+/// chat too.
+pub fn default_routing() -> [OutputSet; RoutingInput::COUNT] {
+    use RoutingOutput::{BroadcastMix, ChatMic, Headphones, LineOut};
+    RoutingInput::ALL.map(|input| match input {
+        RoutingInput::Mic => OutputSet::of(&[BroadcastMix, ChatMic]),
+        RoutingInput::Samples => OutputSet::of(&[Headphones, BroadcastMix, ChatMic, LineOut]),
+        _ => OutputSet::of(&[Headphones, BroadcastMix, LineOut]),
+    })
+}
+
+/// Two routes only feed a sound back to where it comes from: the voice chat
+/// into the voice chat, and the samples into the sampler.
+pub fn can_route(input: RoutingInput, output: RoutingOutput) -> bool {
+    !matches!(
+        (input, output),
+        (RoutingInput::Chat, RoutingOutput::ChatMic)
+            | (RoutingInput::Samples, RoutingOutput::Sampler)
+    )
+}
+
+/// Faders, volumes, mutes and routing. The device cannot be asked for them,
+/// so the app keeps them and sends them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MixerState {
     /// The channel under each fader.
@@ -39,6 +63,8 @@ pub struct MixerState {
     /// The microphone button: silences the microphone itself, whatever the
     /// mute of its channel says.
     pub mic_off: bool,
+    /// The outputs each input is sent to, in `RoutingInput::ALL` order.
+    pub routing: [OutputSet; RoutingInput::COUNT],
 }
 
 impl MixerState {
@@ -71,6 +97,7 @@ impl MixerState {
             volumes: [None; Channel::COUNT],
             muted: [false; Channel::COUNT],
             mic_off: false,
+            routing: default_routing(),
         }
     }
 
@@ -106,6 +133,12 @@ pub enum Intent {
         fader: Fader,
         channel: Channel,
     },
+    /// Sends an input to an output, or stops sending it there.
+    SetRoute {
+        input: RoutingInput,
+        output: RoutingOutput,
+        on: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -118,6 +151,8 @@ pub struct Snapshot {
     pub channels: Vec<ChannelView>,
     /// The microphone itself is off, whatever its channel says.
     pub mic_off: bool,
+    /// One row per input, in the order of the device.
+    pub routing: Vec<RouteView>,
     /// Buttons held down right now.
     pub pressed: Vec<Button>,
     /// Between -72.2 (silence) and 0 (full scale).
@@ -151,6 +186,13 @@ pub struct ChannelView {
     pub fader: Option<Fader>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RouteView {
+    pub input: RoutingInput,
+    /// The outputs the input is sent to.
+    pub outputs: Vec<RoutingOutput>,
+}
+
 /// A fader sent somewhere by the app: its readings are not believed while
 /// its motor travels.
 #[derive(Debug, Clone, Copy)]
@@ -177,8 +219,8 @@ impl Hub {
     /// Takes a real device over, changing how it sounds as little as the
     /// truth of the screen allows.
     ///
-    /// The fader assignment, the mutes and the mute lights are sent, because
-    /// the device cannot tell them. Volumes are only sent when the app knows
+    /// The fader assignment, the mutes, the routing and the mute lights are
+    /// sent, because the device cannot tell them. Volumes are only sent when the app knows
     /// them: those of a device that dropped and came back. The others are
     /// read from the faders, or stay unknown.
     pub fn adopt(
@@ -198,19 +240,26 @@ impl Hub {
             travels: [None; Fader::COUNT],
             held: None,
         };
+        // A device that was just plugged in plays with its own settings:
+        // what silences is sent first.
+        for (input, outputs) in RoutingInput::ALL.into_iter().zip(hub.mixer.routing) {
+            hub.device.set_routing(input, outputs)?;
+        }
+        for channel in Channel::ALL {
+            if channel != Channel::Mic {
+                let muted = hub.mixer.muted[usize::from(channel.index())];
+                hub.device.set_muted(channel, muted)?;
+            }
+        }
+        hub.send_mic(hub.mixer.mic_silenced())?;
         for (fader, channel) in Fader::ALL.into_iter().zip(hub.mixer.faders) {
             hub.device.set_fader(fader, channel)?;
         }
         for channel in Channel::ALL {
-            let index = usize::from(channel.index());
-            if let Some(volume) = hub.mixer.volumes[index] {
+            if let Some(volume) = hub.mixer.volumes[usize::from(channel.index())] {
                 hub.send_volume(channel, volume)?;
             }
-            if channel != Channel::Mic {
-                hub.device.set_muted(channel, hub.mixer.muted[index])?;
-            }
         }
-        hub.send_mic(hub.mixer.mic_silenced())?;
         hub.send_lights()?;
         Ok(hub)
     }
@@ -230,7 +279,24 @@ impl Hub {
             Intent::SetMuted { channel, muted } => self.set_muted(channel, muted),
             Intent::SetMicOff { off } => self.set_mic_off(off),
             Intent::AssignFader { fader, channel } => self.assign(fader, channel),
+            Intent::SetRoute { input, output, on } => self.set_route(input, output, on),
         }
+    }
+
+    /// The device takes the outputs of an input as a whole.
+    fn set_route(
+        &mut self,
+        input: RoutingInput,
+        output: RoutingOutput,
+        on: bool,
+    ) -> Result<(), DeviceError> {
+        if !can_route(input, output) {
+            return Ok(());
+        }
+        let outputs = self.mixer.routing[input as usize].with(output, on);
+        self.device.set_routing(input, outputs)?;
+        self.mixer.routing[input as usize] = outputs;
+        Ok(())
     }
 
     /// Sends a volume; the fader that carries the channel will travel there.
@@ -405,6 +471,14 @@ impl Hub {
                 })
                 .collect(),
             mic_off: self.mixer.mic_off,
+            routing: RoutingInput::ALL
+                .into_iter()
+                .zip(self.mixer.routing)
+                .map(|(input, outputs)| RouteView {
+                    input,
+                    outputs: outputs.iter().collect(),
+                })
+                .collect(),
             pressed: status.pressed.iter().collect(),
             mic_level_db: mic_level_db(mic_level),
         })
@@ -414,6 +488,7 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use goxlr_hub_device::open_virtual;
+    use goxlr_hub_protocol::Side;
     use serde_json::json;
 
     use super::*;
@@ -431,6 +506,101 @@ mod tests {
         assert_eq!(device.volumes.map(Some), hub.mixer().volumes);
         assert_eq!(device.muted, hub.mixer().muted);
         assert_eq!(device.volumes[usize::from(Channel::Music.index())], 120);
+        for input in RoutingInput::ALL {
+            assert_eq!(routed(&hands, input), hub.mixer().routing[input as usize]);
+        }
+        assert_eq!(
+            routed(&hands, RoutingInput::Mic),
+            OutputSet::of(&[RoutingOutput::BroadcastMix, RoutingOutput::ChatMic])
+        );
+        assert_eq!(
+            routed(&hands, RoutingInput::Music),
+            OutputSet::of(&[
+                RoutingOutput::Headphones,
+                RoutingOutput::BroadcastMix,
+                RoutingOutput::LineOut
+            ])
+        );
+    }
+
+    /// The outputs an input feeds on the device, the same on both sides.
+    fn routed(hands: &goxlr_hub_device::VirtualHandle, input: RoutingInput) -> OutputSet {
+        let device = hands.state();
+        let left = device.routed(input, Side::Left);
+        assert_eq!(left, device.routed(input, Side::Right), "{input:?}");
+        left
+    }
+
+    fn route(input: RoutingInput, output: RoutingOutput, on: bool) -> Intent {
+        Intent::SetRoute { input, output, on }
+    }
+
+    #[test]
+    fn a_route_set_from_the_screen_reaches_the_device_and_leaves_the_others() {
+        let (mut hub, hands) = hub();
+        hub.apply(route(RoutingInput::Mic, RoutingOutput::Headphones, true))
+            .unwrap();
+        hub.apply(route(RoutingInput::Music, RoutingOutput::Headphones, false))
+            .unwrap();
+
+        assert_eq!(
+            routed(&hands, RoutingInput::Mic),
+            OutputSet::of(&[
+                RoutingOutput::Headphones,
+                RoutingOutput::BroadcastMix,
+                RoutingOutput::ChatMic
+            ])
+        );
+        assert_eq!(
+            routed(&hands, RoutingInput::Music),
+            OutputSet::of(&[RoutingOutput::BroadcastMix, RoutingOutput::LineOut])
+        );
+        assert_eq!(
+            routed(&hands, RoutingInput::Game),
+            default_routing()[RoutingInput::Game as usize]
+        );
+
+        let snapshot = hub.poll().unwrap();
+        let music = &snapshot.routing[RoutingInput::Music as usize];
+        assert_eq!(music.input, RoutingInput::Music);
+        assert_eq!(
+            music.outputs,
+            [RoutingOutput::BroadcastMix, RoutingOutput::LineOut]
+        );
+    }
+
+    #[test]
+    fn an_input_can_be_sent_nowhere() {
+        let (mut hub, hands) = hub();
+        for output in RoutingOutput::ALL {
+            hub.apply(route(RoutingInput::Mic, output, false)).unwrap();
+        }
+        assert_eq!(routed(&hands, RoutingInput::Mic), OutputSet::default());
+        let snapshot = hub.poll().unwrap();
+        assert_eq!(snapshot.routing[RoutingInput::Mic as usize].outputs, []);
+        assert_eq!(snapshot.routing.len(), 8);
+    }
+
+    #[test]
+    fn a_route_that_makes_no_sense_is_not_sent() {
+        assert!(!can_route(RoutingInput::Chat, RoutingOutput::ChatMic));
+        assert!(!can_route(RoutingInput::Samples, RoutingOutput::Sampler));
+        assert!(can_route(RoutingInput::Samples, RoutingOutput::ChatMic));
+        assert!(can_route(RoutingInput::Mic, RoutingOutput::Sampler));
+        for (input, outputs) in RoutingInput::ALL.into_iter().zip(default_routing()) {
+            for output in outputs.iter() {
+                assert!(can_route(input, output), "{input:?} to {output:?}");
+            }
+        }
+
+        let (mut hub, hands) = hub();
+        let (device, mixer) = (hands.state(), hub.mixer().clone());
+        hub.apply(route(RoutingInput::Chat, RoutingOutput::ChatMic, true))
+            .unwrap();
+        hub.apply(route(RoutingInput::Samples, RoutingOutput::Sampler, true))
+            .unwrap();
+        assert_eq!(hands.state(), device);
+        assert_eq!(hub.mixer(), &mixer);
     }
 
     #[test]
@@ -822,7 +992,16 @@ mod tests {
                 channel: Channel::LineIn
             }
         );
+        assert_eq!(
+            read(
+                json!({ "type": "setRoute", "input": "lineIn", "output": "broadcastMix", "on": false })
+            ),
+            route(RoutingInput::LineIn, RoutingOutput::BroadcastMix, false)
+        );
         for refused in [
+            json!({ "type": "setRoute", "input": "headphones", "output": "chatMic", "on": true }),
+            json!({ "type": "setRoute", "input": "mic", "output": "mic", "on": true }),
+            json!({ "type": "setRoute", "input": "mic", "output": "sampler" }),
             json!({ "type": "setVolume", "channel": "music", "volume": 256 }),
             json!({ "type": "setVolume", "channel": "nowhere", "volume": 1 }),
             json!({ "type": "assignFader", "fader": "e", "channel": "mic" }),
@@ -866,6 +1045,17 @@ mod tests {
         assert_eq!(
             value["channels"][9],
             json!({ "channel": "micMonitor", "volume": 255, "muted": false, "fader": null })
+        );
+        assert_eq!(
+            value["routing"][0],
+            json!({ "input": "mic", "outputs": ["broadcastMix", "chatMic"] })
+        );
+        assert_eq!(
+            value["routing"][7],
+            json!({
+                "input": "samples",
+                "outputs": ["headphones", "broadcastMix", "chatMic", "lineOut"]
+            })
         );
         assert_eq!(value["pressed"], json!(["micMute"]));
         assert_eq!(value["micOff"], json!(false));
