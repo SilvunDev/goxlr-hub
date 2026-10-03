@@ -106,6 +106,10 @@ impl<L: Link> Device for Session<L> {
         self.send(Request::SetMuted { channel, muted })
     }
 
+    fn set_mic_input_muted(&mut self, muted: bool) -> Result<(), DeviceError> {
+        self.send(Request::SetMicInputMuted { muted })
+    }
+
     fn set_button_lights(&mut self, lights: ButtonLights) -> Result<(), DeviceError> {
         self.send(Request::SetButtonLights { lights })
     }

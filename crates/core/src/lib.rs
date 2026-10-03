@@ -36,6 +36,17 @@ pub struct MixerState {
     /// `None` when the app never set the volume and no fader shows it.
     pub volumes: [Option<u8>; Channel::COUNT],
     pub muted: [bool; Channel::COUNT],
+    /// The microphone button: silences the microphone itself, whatever the
+    /// mute of its channel says.
+    pub mic_off: bool,
+}
+
+impl MixerState {
+    /// Nothing of the microphone is heard: its channel is muted, or the
+    /// microphone itself is off.
+    pub fn mic_silenced(&self) -> bool {
+        self.mic_off || self.muted[usize::from(Channel::Mic.index())]
+    }
 }
 
 impl Default for MixerState {
@@ -59,6 +70,7 @@ impl MixerState {
             faders: [Channel::Mic, Channel::Chat, Channel::Music, Channel::System],
             volumes: [None; Channel::COUNT],
             muted: [false; Channel::COUNT],
+            mic_off: false,
         }
     }
 
@@ -84,6 +96,10 @@ pub enum Intent {
         channel: Channel,
         muted: bool,
     },
+    /// Turns the microphone itself off or on, like its button does.
+    SetMicOff {
+        off: bool,
+    },
     /// Puts a channel under a fader. A channel that is already under
     /// another fader swaps places with the one it replaces.
     AssignFader {
@@ -100,6 +116,8 @@ pub struct Snapshot {
     pub device: DeviceView,
     pub faders: [FaderView; Fader::COUNT],
     pub channels: Vec<ChannelView>,
+    /// The microphone itself is off, whatever its channel says.
+    pub mic_off: bool,
     /// Buttons held down right now.
     pub pressed: Vec<Button>,
     /// Between -72.2 (silence) and 0 (full scale).
@@ -188,8 +206,11 @@ impl Hub {
             if let Some(volume) = hub.mixer.volumes[index] {
                 hub.send_volume(channel, volume)?;
             }
-            hub.device.set_muted(channel, hub.mixer.muted[index])?;
+            if channel != Channel::Mic {
+                hub.device.set_muted(channel, hub.mixer.muted[index])?;
+            }
         }
+        hub.send_mic(hub.mixer.mic_silenced())?;
         hub.send_lights()?;
         Ok(hub)
     }
@@ -207,6 +228,7 @@ impl Hub {
                 Ok(())
             }
             Intent::SetMuted { channel, muted } => self.set_muted(channel, muted),
+            Intent::SetMicOff { off } => self.set_mic_off(off),
             Intent::AssignFader { fader, channel } => self.assign(fader, channel),
         }
     }
@@ -224,9 +246,26 @@ impl Hub {
     }
 
     fn set_muted(&mut self, channel: Channel, muted: bool) -> Result<(), DeviceError> {
-        self.device.set_muted(channel, muted)?;
+        if channel == Channel::Mic {
+            self.send_mic(muted || self.mixer.mic_off)?;
+        } else {
+            self.device.set_muted(channel, muted)?;
+        }
         self.mixer.muted[usize::from(channel.index())] = muted;
         self.send_lights()
+    }
+
+    fn set_mic_off(&mut self, off: bool) -> Result<(), DeviceError> {
+        self.send_mic(off || self.mixer.muted[usize::from(Channel::Mic.index())])?;
+        self.mixer.mic_off = off;
+        self.send_lights()
+    }
+
+    /// Muting the channel of the microphone is not enough to silence it
+    /// everywhere: its input is muted too.
+    fn send_mic(&mut self, silenced: bool) -> Result<(), DeviceError> {
+        self.device.set_muted(Channel::Mic, silenced)?;
+        self.device.set_mic_input_muted(silenced)
     }
 
     fn assign(&mut self, fader: Fader, channel: Channel) -> Result<(), DeviceError> {
@@ -270,7 +309,7 @@ impl Hub {
                 lights.set(button, ButtonLight::Lit);
             }
         }
-        if muted(Channel::Mic) {
+        if self.mixer.mic_off {
             lights.set(Button::MicMute, ButtonLight::Lit);
         }
         lights
@@ -280,22 +319,23 @@ impl Hub {
         self.device.set_button_lights(self.lights())
     }
 
-    /// The channels whose mute button went down since the last reading.
-    fn mute_presses(&mut self, pressed: ButtonSet) -> Vec<Channel> {
+    /// Does what the mute buttons that went down since the last reading
+    /// are for.
+    fn follow_buttons(&mut self, pressed: ButtonSet) -> Result<(), DeviceError> {
         // Buttons already down when the device is taken over are no press.
         let held = self.held.replace(pressed).unwrap_or(pressed);
         let went_down = |button: Button| pressed.contains(button) && !held.contains(button);
 
-        let mut channels: Vec<Channel> = MUTE_BUTTONS
-            .into_iter()
-            .zip(self.mixer.faders)
-            .filter(|(button, _)| went_down(*button))
-            .map(|(_, channel)| channel)
-            .collect();
-        if went_down(Button::MicMute) && !channels.contains(&Channel::Mic) {
-            channels.push(Channel::Mic);
+        for (button, channel) in MUTE_BUTTONS.into_iter().zip(self.mixer.faders) {
+            if went_down(button) {
+                let muted = self.mixer.muted[usize::from(channel.index())];
+                self.set_muted(channel, !muted)?;
+            }
         }
-        channels
+        if went_down(Button::MicMute) {
+            self.set_mic_off(!self.mixer.mic_off)?;
+        }
+        Ok(())
     }
 
     /// Reads what changed on the device and returns the picture to draw.
@@ -320,10 +360,7 @@ impl Hub {
             self.mixer.volumes[usize::from(channel.index())] = Some(position);
         }
 
-        for channel in self.mute_presses(status.pressed) {
-            let muted = self.mixer.muted[usize::from(channel.index())];
-            self.set_muted(channel, !muted)?;
-        }
+        self.follow_buttons(status.pressed)?;
 
         let volume = |channel: Channel| self.mixer.volumes[usize::from(channel.index())];
         let muted = |channel: Channel| self.mixer.muted[usize::from(channel.index())];
@@ -367,6 +404,7 @@ impl Hub {
                     fader: self.mixer.fader_of(channel).map(|at| Fader::ALL[at]),
                 })
                 .collect(),
+            mic_off: self.mixer.mic_off,
             pressed: status.pressed.iter().collect(),
             mic_level_db: mic_level_db(mic_level),
         })
@@ -502,33 +540,56 @@ mod tests {
     }
 
     #[test]
-    fn the_microphone_button_mutes_the_microphone_wherever_it_is() {
+    fn the_microphone_button_turns_the_microphone_off_not_its_channel() {
         let (mut hub, hands) = hub();
-        hub.apply(Intent::AssignFader {
-            fader: Fader::A,
-            channel: Channel::Game,
-        })
-        .unwrap();
         hub.poll().unwrap();
 
         hands.press(Button::MicMute);
         let snapshot = hub.poll().unwrap();
-        assert!(snapshot.channels[at(Channel::Mic)].muted);
-        assert!(!snapshot.faders[0].muted);
-        assert_eq!(hands.state().lights.get(Button::MicMute), ButtonLight::Lit);
-        assert_eq!(
-            hands.state().lights.get(Button::Fader1Mute),
-            ButtonLight::Dimmed
+        assert!(snapshot.mic_off);
+        assert!(
+            !snapshot.faders[0].muted,
+            "the channel mute is another thing"
         );
+        let device = hands.state();
+        assert!(device.mic_input_muted && device.muted[at(Channel::Mic)]);
+        assert_eq!(device.lights.get(Button::MicMute), ButtonLight::Lit);
+        assert_eq!(device.lights.get(Button::Fader1Mute), ButtonLight::Dimmed);
+
+        hands.release(Button::MicMute);
+        hub.poll().unwrap();
+        hands.press(Button::MicMute);
+        assert!(!hub.poll().unwrap().mic_off);
+        let device = hands.state();
+        assert!(!device.mic_input_muted && !device.muted[at(Channel::Mic)]);
+        assert_eq!(device.lights, ButtonLights::default());
     }
 
     #[test]
-    fn the_microphone_and_its_fader_button_pressed_together_toggle_once() {
+    fn the_microphone_is_heard_only_when_neither_mute_holds_it() {
         let (mut hub, hands) = hub();
-        hub.poll().unwrap();
-        hands.press(Button::MicMute);
-        hands.press(Button::Fader1Mute);
-        assert!(hub.poll().unwrap().faders[0].muted);
+        let silenced = || {
+            let device = hands.state();
+            assert_eq!(device.mic_input_muted, device.muted[at(Channel::Mic)]);
+            device.mic_input_muted
+        };
+        let channel = |muted| Intent::SetMuted {
+            channel: Channel::Mic,
+            muted,
+        };
+
+        hub.apply(channel(true)).unwrap();
+        assert!(silenced());
+        hub.apply(Intent::SetMicOff { off: true }).unwrap();
+        hub.apply(channel(false)).unwrap();
+        assert!(silenced(), "the microphone is still off");
+        hub.apply(Intent::SetMicOff { off: false }).unwrap();
+        assert!(!silenced());
+
+        hub.apply(channel(true)).unwrap();
+        hub.apply(Intent::SetMicOff { off: true }).unwrap();
+        hub.apply(Intent::SetMicOff { off: false }).unwrap();
+        assert!(silenced(), "the channel is still muted");
     }
 
     #[test]
@@ -627,6 +688,9 @@ mod tests {
         }
         fn set_muted(&mut self, channel: Channel, muted: bool) -> Result<(), DeviceError> {
             self.device.set_muted(channel, muted)
+        }
+        fn set_mic_input_muted(&mut self, muted: bool) -> Result<(), DeviceError> {
+            self.device.set_mic_input_muted(muted)
         }
         fn set_button_lights(&mut self, lights: ButtonLights) -> Result<(), DeviceError> {
             self.device.set_button_lights(lights)
@@ -748,6 +812,10 @@ mod tests {
             }
         );
         assert_eq!(
+            read(json!({ "type": "setMicOff", "off": true })),
+            Intent::SetMicOff { off: true }
+        );
+        assert_eq!(
             read(json!({ "type": "assignFader", "fader": "d", "channel": "lineIn" })),
             Intent::AssignFader {
                 fader: Fader::D,
@@ -800,6 +868,7 @@ mod tests {
             json!({ "channel": "micMonitor", "volume": 255, "muted": false, "fader": null })
         );
         assert_eq!(value["pressed"], json!(["micMute"]));
+        assert_eq!(value["micOff"], json!(false));
         assert!(value["micLevelDb"].is_number());
     }
 
@@ -823,6 +892,9 @@ mod tests {
                 Ok(())
             }
             fn set_muted(&mut self, _: Channel, _: bool) -> Result<(), DeviceError> {
+                Ok(())
+            }
+            fn set_mic_input_muted(&mut self, _: bool) -> Result<(), DeviceError> {
                 Ok(())
             }
             fn set_button_lights(&mut self, _: ButtonLights) -> Result<(), DeviceError> {

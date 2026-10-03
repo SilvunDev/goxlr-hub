@@ -97,7 +97,11 @@
       <option value={channel}>{i18n.t.channels[channel]}</option>
     {/each}
   </select>
-  <MuteButton channel={view.channel} muted={view.muted} />
+  <MuteButton
+    label={i18n.t.mixer.mute.replace('{channel}', name)}
+    muted={view.muted}
+    ontoggle={(muted) => sendIntent({ type: 'setMuted', channel: view.channel, muted })}
+  />
 </article>
 
 <style>

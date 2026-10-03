@@ -63,6 +63,9 @@ pub trait Device: Send {
 
     fn set_muted(&mut self, channel: Channel, muted: bool) -> Result<(), DeviceError>;
 
+    /// Silences the microphone itself, whatever its channel is set to.
+    fn set_mic_input_muted(&mut self, muted: bool) -> Result<(), DeviceError>;
+
     /// Lights every button at once.
     fn set_button_lights(&mut self, lights: ButtonLights) -> Result<(), DeviceError>;
 

@@ -40,7 +40,11 @@
   <span class="value">
     {volume === null ? i18n.t.channelList.unknown : `${volumePercent(volume)}%`}
   </span>
-  <MuteButton channel={view.channel} muted={view.muted} />
+  <MuteButton
+    label={i18n.t.mixer.mute.replace('{channel}', name)}
+    muted={view.muted}
+    ontoggle={(muted) => sendIntent({ type: 'setMuted', channel: view.channel, muted })}
+  />
 </li>
 
 <style>

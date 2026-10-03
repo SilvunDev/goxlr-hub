@@ -21,6 +21,7 @@ pub struct VirtualState {
     pub faders: [Channel; Fader::COUNT],
     pub volumes: [u8; Channel::COUNT],
     pub muted: [bool; Channel::COUNT],
+    pub mic_input_muted: bool,
     pub lights: ButtonLights,
     /// Outputs of each input, in `RoutingInput::ALL` order, left then right.
     pub routing: [[OutputSet; 2]; RoutingInput::COUNT],
@@ -38,6 +39,7 @@ impl Default for VirtualState {
             faders: [Channel::Mic, Channel::Chat, Channel::Music, Channel::System],
             volumes: [0; Channel::COUNT],
             muted: [false; Channel::COUNT],
+            mic_input_muted: false,
             lights: ButtonLights::default(),
             routing: [[OutputSet::default(); 2]; RoutingInput::COUNT],
             mic_type: MicType::Dynamic,
@@ -95,6 +97,10 @@ impl VirtualState {
             }
             Request::SetMuted { channel, muted } => {
                 self.muted[usize::from(channel.index())] = muted;
+                Vec::new()
+            }
+            Request::SetMicInputMuted { muted } => {
+                self.mic_input_muted = muted;
                 Vec::new()
             }
             Request::SetButtonLights { lights } => {
@@ -256,9 +262,11 @@ mod tests {
         let mut lights = ButtonLights::default();
         lights.set(Button::Fader3Mute, ButtonLight::Lit);
         device.set_button_lights(lights).unwrap();
+        device.set_mic_input_muted(true).unwrap();
 
         let state = hands.state();
         assert_eq!(state.lights, lights);
+        assert!(state.mic_input_muted);
         assert_eq!(state.faders[1], Channel::Game);
         assert_eq!(state.volumes[usize::from(Channel::Game.index())], 99);
         assert!(state.muted[usize::from(Channel::Music.index())]);

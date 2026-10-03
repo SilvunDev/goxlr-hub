@@ -45,6 +45,7 @@ function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
       { channel: 'game', volume: 51, muted: false, fader: null },
       { channel: 'headphones', volume: null, muted: false, fader: null },
     ],
+    micOff: false,
     pressed: [],
     micLevelDb: -23.44,
     ...overrides,
@@ -273,6 +274,26 @@ describe('App', () => {
         { type: 'setMuted', channel: 'mic', muted: true },
         { type: 'setMuted', channel: 'chat', muted: false },
       ]);
+    });
+
+    it('turns the microphone off apart from the mute of its channel', async () => {
+      render(App);
+      await report(snapshot());
+      const button = screen.getByRole('button', { name: 'Turn the microphone off' });
+      expect(button.getAttribute('aria-pressed')).toBe('false');
+      expect(button.textContent?.trim()).toBe('Live');
+      await fireEvent.click(button);
+      expect(feed.sent).toEqual([{ type: 'setMicOff', off: true }]);
+
+      await report(snapshot({ micOff: true }));
+      const off = screen.getByRole('button', { name: 'Turn the microphone off' });
+      expect(off.getAttribute('aria-pressed')).toBe('true');
+      expect(off.textContent?.trim()).toBe('Muted');
+      expect(screen.getByRole('button', { name: 'Mute Mic' }).getAttribute('aria-pressed')).toBe(
+        'false',
+      );
+      await fireEvent.click(off);
+      expect(feed.sent[1]).toEqual({ type: 'setMicOff', off: false });
     });
 
     it('puts another channel under a fader', async () => {

@@ -197,6 +197,7 @@ mod tests {
                         Request::SetFader { .. }
                             | Request::SetVolume { .. }
                             | Request::SetMuted { .. }
+                            | Request::SetMicInputMuted { .. }
                             | Request::SetButtonLights { .. }
                             | Request::SetRouting { .. }
                             | Request::SetMicGain { .. }
@@ -332,10 +333,9 @@ mod tests {
             ]
             .map(|(fader, channel)| Request::SetFader { fader, channel })
         );
-        assert_eq!(
-            bench.mutes_received(),
-            Channel::ALL.map(|channel| (channel, false))
-        );
+        let mut mutes = bench.mutes_received();
+        mutes.sort_by_key(|(channel, _)| channel.index());
+        assert_eq!(mutes, Channel::ALL.map(|channel| (channel, false)));
         assert_eq!(
             settings.last(),
             Some(&Request::SetButtonLights {
@@ -343,7 +343,8 @@ mod tests {
             })
         );
         assert_eq!(bench.volumes_received(), []);
-        assert_eq!(settings.len(), 4 + 11 + 1);
+        assert!(settings.contains(&Request::SetMicInputMuted { muted: false }));
+        assert_eq!(settings.len(), 4 + 11 + 1 + 1);
     }
 
     #[test]

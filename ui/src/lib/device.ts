@@ -53,6 +53,7 @@ export interface FaderView {
 export type Intent =
   | { type: 'setVolume'; channel: ChannelId; volume: number }
   | { type: 'setMuted'; channel: ChannelId; muted: boolean }
+  | { type: 'setMicOff'; off: boolean }
   | { type: 'assignFader'; fader: FaderId; channel: ChannelId };
 
 /**
@@ -77,6 +78,8 @@ export interface Snapshot {
   };
   faders: FaderView[];
   channels: ChannelView[];
+  /** The microphone itself is off, whatever its channel says. */
+  micOff: boolean;
   /** Buttons held down right now. */
   pressed: string[];
   /** Between -72.2 (silence) and 0 (full scale). */

@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { sendIntent } from '../backend';
-  import type { ChannelId } from '../device';
   import { i18n } from '../i18n/index.svelte';
 
-  let { channel, muted }: { channel: ChannelId; muted: boolean } = $props();
-
-  let label = $derived(i18n.t.mixer.mute.replace('{channel}', i18n.t.channels[channel]));
+  let {
+    label,
+    muted,
+    ontoggle,
+  }: { label: string; muted: boolean; ontoggle: (muted: boolean) => void } = $props();
 </script>
 
 <button
@@ -14,7 +14,7 @@
   class:muted
   aria-label={label}
   aria-pressed={muted}
-  onclick={() => sendIntent({ type: 'setMuted', channel, muted: !muted })}
+  onclick={() => ontoggle(!muted)}
 >
   {muted ? i18n.t.mixer.muted : i18n.t.mixer.live}
 </button>
@@ -34,7 +34,7 @@
     color: var(--silkscreen);
   }
 
-  /* A muted channel says so in words and gets a filled badge. */
+  /* What is muted says so in words and gets a filled badge. */
   .muted,
   .muted:hover {
     background: var(--silkscreen);
