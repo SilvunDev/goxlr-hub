@@ -1,0 +1,13 @@
+[package]
+name = "goxlr-hub-device"
+description = "One device interface for GoXLR Hub, with a virtual device behind it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+goxlr-hub-protocol = { path = "../protocol" }
+thiserror = "2"
