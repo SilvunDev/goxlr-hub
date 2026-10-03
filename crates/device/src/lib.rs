@@ -10,7 +10,8 @@ mod session;
 mod virtual_device;
 
 use goxlr_hub_protocol::{
-    ButtonLights, Channel, Fader, MicType, OutputSet, ProtocolError, RoutingInput, Status,
+    ButtonLights, Channel, EffectKey, Fader, MicParamKey, MicType, OutputSet, ProtocolError,
+    RoutingInput, Status,
 };
 use thiserror::Error;
 
@@ -72,4 +73,11 @@ pub trait Device: Send {
     fn set_routing(&mut self, input: RoutingInput, outputs: OutputSet) -> Result<(), DeviceError>;
 
     fn set_mic_gain(&mut self, mic_type: MicType, gain: u16) -> Result<(), DeviceError>;
+
+    /// Sets one setting of the microphone processing.
+    fn set_effect(&mut self, key: EffectKey, value: i32) -> Result<(), DeviceError>;
+
+    /// Sets one setting of the gate or of the compressor. The full-size
+    /// GoXLR wants them as an effect too.
+    fn set_mic_param(&mut self, key: MicParamKey, value: f32) -> Result<(), DeviceError>;
 }

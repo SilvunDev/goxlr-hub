@@ -2,11 +2,12 @@
 //! real one and answers the way the firmware does, so the whole app can run,
 //! and be tested, without hardware.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use goxlr_hub_protocol::{
-    Button, ButtonLights, ButtonSet, Channel, Fader, FirmwareInfo, MicType, OutputSet, Packet,
-    Request, RoutingInput, SerialInfo, Side, Status, Version, encode_mic_level,
+    Button, ButtonLights, ButtonSet, Channel, EffectKey, Fader, FirmwareInfo, MicParamKey, MicType,
+    OutputSet, Packet, Request, RoutingInput, SerialInfo, Side, Status, Version, encode_mic_level,
 };
 
 use crate::{DeviceError, DeviceKind, Link, Session};
@@ -15,7 +16,7 @@ use crate::{DeviceError, DeviceKind, Link, Session};
 const MIC_READS_PER_SECOND: f32 = 20.0;
 
 /// Everything the virtual device remembers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VirtualState {
     /// The channel under each fader.
     pub faders: [Channel; Fader::COUNT],
@@ -27,6 +28,12 @@ pub struct VirtualState {
     pub routing: [[OutputSet; 2]; RoutingInput::COUNT],
     pub mic_type: MicType,
     pub mic_gain: u16,
+    /// Whether a microphone type and gain were ever received.
+    pub mic_gain_set: bool,
+    /// The microphone processing received as effects.
+    pub effects: BTreeMap<EffectKey, i32>,
+    /// The microphone processing received as microphone parameters.
+    pub mic_params: BTreeMap<MicParamKey, f32>,
     pub pressed: ButtonSet,
     pub encoders: [i8; 4],
     mic_reads: u64,
@@ -44,6 +51,9 @@ impl Default for VirtualState {
             routing: [[OutputSet::default(); 2]; RoutingInput::COUNT],
             mic_type: MicType::Dynamic,
             mic_gain: 0,
+            mic_gain_set: false,
+            effects: BTreeMap::new(),
+            mic_params: BTreeMap::new(),
             pressed: ButtonSet::default(),
             encoders: [0; 4],
             mic_reads: 0,
@@ -118,6 +128,15 @@ impl VirtualState {
             Request::SetMicGain { mic_type, gain } => {
                 self.mic_type = mic_type;
                 self.mic_gain = gain;
+                self.mic_gain_set = true;
+                Vec::new()
+            }
+            Request::SetEffect { key, value } => {
+                self.effects.insert(key, value);
+                Vec::new()
+            }
+            Request::SetMicParam { key, value } => {
+                self.mic_params.insert(key, value);
                 Vec::new()
             }
         }
@@ -231,7 +250,9 @@ pub fn open_virtual() -> Result<(Session<VirtualGoXlr>, VirtualHandle), DeviceEr
 
 #[cfg(test)]
 mod tests {
-    use goxlr_hub_protocol::{ButtonLight, MIC_LEVEL_FLOOR_DB, RoutingOutput, mic_level_db};
+    use goxlr_hub_protocol::{
+        ButtonLight, EqBand, MIC_LEVEL_FLOOR_DB, RoutingOutput, mic_level_db,
+    };
 
     use super::*;
     use crate::Device;
@@ -280,6 +301,28 @@ mod tests {
             assert_eq!(state.routed(RoutingInput::Chat, side), OutputSet::default());
         }
         assert_eq!((state.mic_type, state.mic_gain), (MicType::Condenser, 30));
+    }
+
+    #[test]
+    fn it_remembers_the_microphone_processing_it_is_sent() {
+        let (mut device, hands) = open_virtual().unwrap();
+        assert!(!hands.state().mic_gain_set);
+        device.set_effect(EffectKey::DeEsser, 40).unwrap();
+        device
+            .set_effect(EffectKey::EqGain(EqBand::Khz4), -9)
+            .unwrap();
+        device
+            .set_mic_param(MicParamKey::CompressorRatio, 2.5)
+            .unwrap();
+        device.set_effect(EffectKey::DeEsser, 60).unwrap();
+        device.set_mic_gain(MicType::Dynamic, 40).unwrap();
+
+        let state = hands.state();
+        assert_eq!(state.effects.len(), 2);
+        assert_eq!(state.effects[&EffectKey::DeEsser], 60);
+        assert_eq!(state.effects[&EffectKey::EqGain(EqBand::Khz4)], -9);
+        assert_eq!(state.mic_params[&MicParamKey::CompressorRatio], 2.5);
+        assert!(state.mic_gain_set);
     }
 
     #[test]
@@ -368,6 +411,8 @@ mod tests {
             packet(0x0080_5000, &[11, 0, 0, 0]), // fader given a channel that does not exist
             packet(0x0080_9000, &[7]),  // neither muted nor open
             packet(0x0080_4002, &[0; 21]), // routing row of the wrong size
+            packet(0x0080_1000, &[0x76, 0, 0, 0, 1, 0, 0, 0]), // reverb: not an effect it knows
+            packet(0x0080_b000, &[0x00, 0x01, 0x07, 0, 0, 0, 0, 0]), // no such microphone parameter
         ] {
             assert!(
                 matches!(device.exchange(&request), Err(DeviceError::Link(_))),
