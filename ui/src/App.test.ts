@@ -24,6 +24,7 @@ function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     muted,
   });
   return {
+    connection: { state: 'demo' },
     device: { kind: 'virtual', firmware: '1.4.3.110', serial: 'VIRTUAL' },
     faders: [
       fader('a', 'mic', 255),
@@ -207,10 +208,90 @@ describe('App', () => {
     });
   });
 
-  it('shows no demo banner for a real GoXLR', async () => {
-    render(App);
-    await report(snapshot({ device: { kind: 'hardware', firmware: '1.4.3.110', serial: 'S1' } }));
-    expect(screen.queryByRole('status')).toBeNull();
-    expect(screen.getByText('GoXLR')).toBeTruthy();
+  describe('with a real GoXLR', () => {
+    const real = { kind: 'hardware', firmware: '1.4.3.110', serial: 'S1' } as const;
+
+    it('shows no banner', async () => {
+      render(App);
+      await report(snapshot({ connection: { state: 'hardware' }, device: real }));
+      expect(screen.queryByRole('status')).toBeNull();
+      expect(screen.getByText('GoXLR')).toBeTruthy();
+    });
+
+    it('goes back to the demo banner when it is unplugged', async () => {
+      render(App);
+      await report(snapshot({ connection: { state: 'hardware' }, device: real }));
+      await report(snapshot());
+      expect(screen.getByRole('status').textContent).toContain('Demo mode');
+    });
+  });
+
+  describe('when the GoXLR cannot be used', () => {
+    it('names the program that must be closed', async () => {
+      render(App);
+      await report(snapshot({ connection: { state: 'busy', program: 'GoXLR Utility' } }));
+      const banner = screen.getByRole('status');
+      expect(banner.textContent).toContain('GoXLR in use');
+      expect(banner.textContent).toContain('Quit GoXLR Utility');
+      expect(banner.textContent).not.toContain('{program}');
+      expect(banner.textContent).not.toContain('Demo mode');
+
+      i18n.setLocale('fr');
+      await tick();
+      expect(screen.getByRole('status').textContent).toContain('Quittez GoXLR Utility');
+    });
+
+    it('still asks to close the other program when its name is missing', async () => {
+      render(App);
+      await report(snapshot({ connection: { state: 'busy' } }));
+      const banner = screen.getByRole('status');
+      expect(banner.textContent).toContain('Quit the other GoXLR program');
+      expect(banner.textContent).not.toContain('undefined');
+    });
+
+    it('refuses a GoXLR Mini politely', async () => {
+      render(App);
+      await report(snapshot({ connection: { state: 'unsupported' } }));
+      expect(screen.getByRole('status').textContent).toContain('GoXLR Mini is not supported');
+
+      i18n.setLocale('fr');
+      await tick();
+      expect(screen.getByRole('status').textContent).toContain('GoXLR Mini n’est pas prise en charge');
+    });
+
+    it('says when a GoXLR is plugged in but does not answer', async () => {
+      render(App);
+      await report(snapshot({ connection: { state: 'unreachable' } }));
+      expect(screen.getByRole('status').textContent).toContain('does not answer');
+
+      i18n.setLocale('fr');
+      await tick();
+      expect(screen.getByRole('status').textContent).toContain('ne répond pas');
+    });
+
+    it('keeps showing the virtual device underneath', async () => {
+      render(App);
+      await report(snapshot({ connection: { state: 'busy', program: 'GoXLR Utility' } }));
+      expect(screen.getAllByRole('article')).toHaveLength(4);
+      expect(screen.getByText('Virtual GoXLR')).toBeTruthy();
+    });
+  });
+
+  describe('with a state it does not fully understand', () => {
+    it('falls back on the kind of device when the connection is missing', async () => {
+      render(App);
+      const { connection: _, ...old } = snapshot();
+      await report(old);
+      expect(screen.getByRole('status').textContent).toContain('Demo mode');
+
+      await report({ ...old, device: { kind: 'hardware', firmware: '1', serial: 'S1' } });
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
+    it('treats an unknown connection state as the demo mode', async () => {
+      render(App);
+      await report(snapshot({ connection: { state: 'teleported' } as never }));
+      expect(screen.getByRole('status').textContent).toContain('Demo mode');
+    });
   });
 });
