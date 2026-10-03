@@ -2,6 +2,8 @@
 //! to it. The device cannot be asked for any of it, so the app keeps it and
 //! sends it.
 
+use std::collections::BTreeMap;
+
 use goxlr_hub_device::{Device, DeviceError};
 use goxlr_hub_protocol::{
     COMPRESSOR_ATTACK_MS, COMPRESSOR_RATIOS, COMPRESSOR_RELEASE_MS, EffectKey, EqBand,
@@ -53,6 +55,15 @@ pub enum GateSetting {
     Release,
 }
 
+impl GateSetting {
+    const ALL: [Self; 4] = [
+        Self::Threshold,
+        Self::Attenuation,
+        Self::Attack,
+        Self::Release,
+    ];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CompressorSetting {
@@ -68,7 +79,29 @@ pub enum CompressorSetting {
     MakeupGain,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+impl CompressorSetting {
+    const ALL: [Self; 5] = [
+        Self::Threshold,
+        Self::Ratio,
+        Self::Attack,
+        Self::Release,
+        Self::MakeupGain,
+    ];
+}
+
+/// A part of the microphone processing that can be put back to neutral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MicBlock {
+    Gate,
+    Compressor,
+    Equalizer,
+    DeEsser,
+    /// The four of them. The type and the gain are left alone.
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Gate {
     pub threshold: i8,
     pub attenuation: u8,
@@ -117,7 +150,7 @@ impl Gate {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Compressor {
     pub threshold: i8,
@@ -178,7 +211,7 @@ impl Compressor {
 
 /// One band of the equaliser: where it sits and how much it turns up or
 /// down.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct EqPoint {
     /// In hertz.
     pub frequency: f32,
@@ -274,28 +307,110 @@ impl MicState {
         for (key, value) in FIXED_EFFECTS {
             device.set_effect(key, value)?;
         }
-        for setting in [
-            GateSetting::Threshold,
-            GateSetting::Attenuation,
-            GateSetting::Attack,
-            GateSetting::Release,
-        ] {
+        for setting in GateSetting::ALL {
             self.gate.send(device, setting)?;
         }
-        for setting in [
-            CompressorSetting::Threshold,
-            CompressorSetting::Ratio,
-            CompressorSetting::Attack,
-            CompressorSetting::Release,
-            CompressorSetting::MakeupGain,
-        ] {
+        for setting in CompressorSetting::ALL {
             self.compressor.send(device, setting)?;
         }
+        self.send_equalizer(device)?;
+        device.set_effect(EffectKey::DeEsser, i32::from(self.de_esser))
+    }
+
+    fn send_equalizer(&self, device: &mut dyn Device) -> Result<(), DeviceError> {
         for (band, point) in EqBand::ALL.into_iter().zip(self.equalizer) {
             send_frequency(device, band, point.frequency)?;
             device.set_effect(EffectKey::EqGain(band), i32::from(point.gain))?;
         }
-        device.set_effect(EffectKey::DeEsser, i32::from(self.de_esser))
+        Ok(())
+    }
+
+    /// Puts a part of the processing back to what it is on a device the app
+    /// meets.
+    pub fn reset(&mut self, device: &mut dyn Device, block: MicBlock) -> Result<(), DeviceError> {
+        let neutral = Self::unknown();
+        let all = block == MicBlock::All;
+        if all || block == MicBlock::Gate {
+            for setting in GateSetting::ALL {
+                neutral.gate.send(device, setting)?;
+            }
+            self.gate = neutral.gate;
+        }
+        if all || block == MicBlock::Compressor {
+            for setting in CompressorSetting::ALL {
+                neutral.compressor.send(device, setting)?;
+            }
+            self.compressor = neutral.compressor;
+        }
+        if all || block == MicBlock::Equalizer {
+            neutral.send_equalizer(device)?;
+            self.equalizer = neutral.equalizer;
+        }
+        if all || block == MicBlock::DeEsser {
+            self.set_de_esser(device, neutral.de_esser)?;
+        }
+        Ok(())
+    }
+
+    /// The microphone as a file keeps it.
+    pub(crate) fn to_file(&self) -> MicFile {
+        MicFile {
+            mic_type: self.mic_type,
+            gain: MicType::ALL.into_iter().zip(self.gains).collect(),
+            de_esser: self.de_esser,
+            gate: self.gate,
+            compressor: self.compressor,
+            equalizer: self.equalizer.to_vec(),
+        }
+    }
+
+    /// The microphone a file describes, every value brought within its
+    /// bounds. Nothing when the equaliser has not its ten bands.
+    pub(crate) fn from_file(file: MicFile) -> Option<Self> {
+        let mut mic = Self::unknown();
+        mic.mic_type = file.mic_type;
+        for (mic_type, gain) in file.gain {
+            mic.gains[mic_type as usize] = gain.min(MAX_GAIN_DB);
+        }
+        for setting in GateSetting::ALL {
+            let value = match setting {
+                GateSetting::Threshold => i32::from(file.gate.threshold),
+                GateSetting::Attenuation => i32::from(file.gate.attenuation),
+                GateSetting::Attack => i32::from(file.gate.attack),
+                GateSetting::Release => i32::from(file.gate.release),
+            };
+            mic.gate = mic.gate.with(setting, value);
+        }
+        for setting in CompressorSetting::ALL {
+            let value = match setting {
+                CompressorSetting::Threshold => i32::from(file.compressor.threshold),
+                CompressorSetting::Ratio => i32::from(file.compressor.ratio),
+                CompressorSetting::Attack => i32::from(file.compressor.attack),
+                CompressorSetting::Release => i32::from(file.compressor.release),
+                CompressorSetting::MakeupGain => i32::from(file.compressor.makeup_gain),
+            };
+            mic.compressor = mic.compressor.with(setting, value);
+        }
+        let points: [EqPoint; EqBand::COUNT] = file.equalizer.try_into().ok()?;
+        // Lowest band first: each one stays within its part of the spectrum
+        // and above the one before.
+        let mut floor = 0.0_f32;
+        for (at, point) in points.into_iter().enumerate() {
+            let (min, max) = band_range(at);
+            let wanted = if point.frequency.is_finite() {
+                point.frequency
+            } else {
+                STARTING_FREQUENCIES[at]
+            };
+            let frequency = wanted.clamp(min.max(floor).min(max), max);
+            floor = frequency;
+            mic.equalizer[at] = EqPoint {
+                frequency,
+                gain: point.gain.clamp(-MAX_EQ_GAIN_DB, MAX_EQ_GAIN_DB),
+            };
+        }
+        mic.de_esser = file.de_esser.min(100);
+        Some(mic)
     }
 
     /// Chooses how the microphone is plugged in. The gain of that type goes
@@ -413,6 +528,22 @@ fn send_frequency(
     frequency: f32,
 ) -> Result<(), DeviceError> {
     device.set_effect(EffectKey::EqFrequency(band), eq_frequency_value(frequency))
+}
+
+/// The microphone as a file keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MicFile {
+    /// Left out until it is chosen.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    mic_type: Option<MicType>,
+    de_esser: u8,
+    /// The gain of each type, in decibels.
+    #[serde(default)]
+    gain: BTreeMap<MicType, u8>,
+    gate: Gate,
+    compressor: Compressor,
+    equalizer: Vec<EqPoint>,
 }
 
 /// The microphone as the interface receives it.

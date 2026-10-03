@@ -4,7 +4,7 @@
 macro_rules! listed_enum {
     ($(#[$meta:meta])* $name:ident { $($variant:ident $(= $value:expr)?),+ $(,)? }) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[cfg_attr(
             feature = "serde",
             derive(serde::Serialize, serde::Deserialize),

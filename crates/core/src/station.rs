@@ -2,9 +2,10 @@
 //! virtual one otherwise, and says which and why.
 
 use goxlr_hub_device::{Device, DeviceError, OpenError, open_virtual};
+use goxlr_hub_protocol::Channel;
 use serde::Serialize;
 
-use crate::{Hub, Intent, Settings, Snapshot};
+use crate::{Hub, Intent, MixerState, Settings, Snapshot};
 
 /// Where real devices come from.
 pub trait Port: Send {
@@ -58,21 +59,36 @@ pub struct Station<P: Port> {
     demo: Hub,
     hardware: Option<Hub>,
     connection: Connection,
-    /// The settings of a real device the app lost, to bring it back as it
-    /// was.
-    remembered: Option<Settings>,
+    /// What the device shown is set to, real or virtual: a real device that
+    /// comes, or comes back, is brought to it.
+    settings: Settings,
+    /// A real device dropped and is expected back.
+    lost: bool,
+}
+
+/// The virtual device is there to be looked at: where the settings know no
+/// volume, it shows a lively one.
+fn for_show(settings: &Settings) -> Settings {
+    let mut shown = settings.clone();
+    let lively = MixerState::default().volumes;
+    for (volume, lively) in shown.mixer.volumes.iter_mut().zip(lively) {
+        *volume = volume.or(lively);
+    }
+    shown
 }
 
 impl<P: Port> Station<P> {
-    /// Starts on the virtual device; `scan` looks for the real one.
-    pub fn new(port: P) -> Result<Self, DeviceError> {
+    /// Starts on the virtual device, set as asked; `scan` looks for the real
+    /// one and brings it to the same settings.
+    pub fn new(port: P, settings: Settings) -> Result<Self, DeviceError> {
         let (device, _) = open_virtual()?;
         Ok(Self {
             port,
-            demo: Hub::connect(Box::new(device))?,
+            demo: Hub::adopt(Box::new(device), Some(&for_show(&settings)))?,
             hardware: None,
             connection: Connection::Demo,
-            remembered: None,
+            settings,
+            lost: false,
         })
     }
 
@@ -80,11 +96,16 @@ impl<P: Port> Station<P> {
         &self.connection
     }
 
+    /// What the device shown is set to.
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
     /// A real device dropped and is expected back. Until the app has it
     /// again it plays with its own settings, so it is worth looking for it
     /// more often.
     pub fn awaits_return(&self) -> bool {
-        self.remembered.is_some() && self.connection == Connection::Demo
+        self.lost && self.connection == Connection::Demo
     }
 
     /// Looks for the real device, or checks that it is still ours. Meant to
@@ -94,20 +115,18 @@ impl<P: Port> Station<P> {
             // Two programs driving the device steal each other's answers:
             // the newcomer gets it.
             if let Some(program) = self.port.rival() {
-                if let Some(hub) = self.hardware.take() {
-                    self.remembered = Some(hub.settings());
-                }
-                self.forget_volumes();
+                self.release();
+                self.settings.mixer.forget_volumes();
                 self.connection = Connection::Busy { program };
             }
             return;
         }
 
         self.connection = match self.port.open() {
-            Ok(device) => match Hub::adopt(device, self.remembered.as_ref()) {
+            Ok(device) => match Hub::adopt(device, Some(&self.settings)) {
                 Ok(hub) => {
                     self.hardware = Some(hub);
-                    self.remembered = None;
+                    self.lost = false;
                     Connection::Hardware
                 }
                 Err(error) => Connection::Unreachable {
@@ -115,8 +134,11 @@ impl<P: Port> Station<P> {
                 },
             },
             Err(OpenError::Absent) => Connection::Demo,
+            // The other program sets the volumes as it pleases. The fader
+            // assignment, the routing and the microphone are put back by the
+            // app, the volumes are not.
             Err(OpenError::Busy { program }) => {
-                self.forget_volumes();
+                self.settings.mixer.forget_volumes();
                 Connection::Busy { program }
             }
             Err(OpenError::Unsupported) => Connection::Unsupported,
@@ -124,32 +146,68 @@ impl<P: Port> Station<P> {
         };
     }
 
-    /// The other program set the volumes as it pleased. The mutes, the
-    /// fader assignment and the microphone are put back by the app, the
-    /// volumes are not.
-    fn forget_volumes(&mut self) {
-        if let Some(settings) = &mut self.remembered {
-            settings.mixer.forget_volumes();
-        }
-    }
-
     /// Does what the interface asked, on the device shown.
     pub fn apply(&mut self, intent: Intent) -> Result<(), DeviceError> {
         if let Some(hub) = &mut self.hardware {
-            if hub.apply(intent).is_err() {
-                self.drop_hardware();
+            match hub.apply(intent) {
+                Ok(()) => self.settings = hub.settings(),
+                Err(_) => self.drop_hardware(),
             }
             return Ok(());
         }
-        self.demo.apply(intent)
+        self.demo.apply(intent)?;
+        self.keep_from_demo(Some(intent));
+        Ok(())
+    }
+
+    /// Brings the device shown to other settings, all of them.
+    pub fn load(&mut self, settings: Settings) -> Result<(), DeviceError> {
+        if let Some(hub) = &mut self.hardware {
+            if hub.load(settings.clone()).is_ok() {
+                self.settings = settings;
+                return Ok(());
+            }
+            self.hardware = None;
+            self.lost = true;
+            self.connection = Connection::Demo;
+        }
+        self.demo.load(for_show(&settings))?;
+        self.settings = settings;
+        Ok(())
+    }
+
+    /// What was set on the virtual device is kept for the real one, but for
+    /// the volumes its faders show: they say nothing of a real device. A
+    /// volume is only known once it was set.
+    fn keep_from_demo(&mut self, intent: Option<Intent>) {
+        let mut settings = self.demo.settings();
+        for channel in Channel::ALL {
+            let at = usize::from(channel.index());
+            let set = matches!(
+                intent,
+                Some(Intent::SetVolume { channel: set, .. }) if set == channel
+            );
+            if self.settings.mixer.volumes[at].is_none() && !set {
+                settings.mixer.volumes[at] = None;
+            }
+        }
+        self.settings = settings;
+    }
+
+    /// Lets the real device go and shows its settings on the virtual one.
+    fn release(&mut self) {
+        if let Some(hub) = self.hardware.take() {
+            self.settings = hub.settings();
+        }
+        // The virtual device always answers.
+        let _ = self.demo.load(for_show(&self.settings));
     }
 
     /// The real device stopped answering: back to the virtual one, keeping
     /// what the real one was set to.
     fn drop_hardware(&mut self) {
-        if let Some(hub) = self.hardware.take() {
-            self.remembered = Some(hub.settings());
-        }
+        self.release();
+        self.lost = true;
         self.connection = Connection::Demo;
     }
 
@@ -158,7 +216,10 @@ impl<P: Port> Station<P> {
     pub fn poll(&mut self) -> Result<Snapshot, DeviceError> {
         if let Some(hub) = &mut self.hardware {
             match hub.poll() {
-                Ok(snapshot) => return Ok(self.stamp(snapshot)),
+                Ok(snapshot) => {
+                    self.settings = hub.settings();
+                    return Ok(self.stamp(snapshot));
+                }
                 Err(_) => self.drop_hardware(),
             }
         }
@@ -303,7 +364,94 @@ mod tests {
             ..Script::default()
         };
         let rival = script.rival.clone();
-        (Station::new(script).unwrap(), rival)
+        (Station::new(script, Settings::unknown()).unwrap(), rival)
+    }
+
+    #[test]
+    fn the_virtual_device_shows_lively_volumes_the_settings_do_not_know() {
+        let (mut station, _) = station([]);
+        let snapshot = station.poll().unwrap();
+        assert_eq!(
+            snapshot.faders.map(|view| view.volume),
+            [214, 178, 120, 196]
+        );
+        assert_eq!(station.settings().mixer.volumes, [None; Channel::COUNT]);
+        assert_eq!(station.settings(), &Settings::unknown());
+    }
+
+    #[test]
+    fn what_was_set_on_the_virtual_device_goes_to_the_real_one_when_it_comes() {
+        let (device, bench) = real_device();
+        let (mut station, _) = station([Err(OpenError::Absent), Ok(device)]);
+        station.scan();
+        for intent in [
+            Intent::SetVolume {
+                channel: Channel::Headphones,
+                volume: 60,
+            },
+            Intent::AssignFader {
+                fader: Fader::B,
+                channel: Channel::Game,
+            },
+            Intent::SetDeEsser { amount: 20 },
+            Intent::SetRoute {
+                input: RoutingInput::Mic,
+                output: RoutingOutput::Headphones,
+                on: true,
+            },
+        ] {
+            station.apply(intent).unwrap();
+        }
+        station.poll().unwrap();
+        assert!(!station.awaits_return(), "no real device was ever lost");
+
+        station.scan();
+        assert_eq!(station.connection(), &Connection::Hardware);
+        // The faders of the virtual device decide of no volume of the real
+        // one: only the volume that was set is sent.
+        assert_eq!(bench.volumes_received(), [(Channel::Headphones, 60)]);
+        let device = bench.hands.state();
+        assert_eq!(device.faders[1], Channel::Game);
+        assert_eq!(device.effects[&EffectKey::DeEsser], 20);
+        assert!(routed(&bench, RoutingInput::Mic).contains(RoutingOutput::Headphones));
+        assert_eq!(station.poll().unwrap().channels[8].volume, Some(60));
+    }
+
+    #[test]
+    fn other_settings_can_be_loaded_on_the_device_shown() {
+        let (first, before) = real_device();
+        let (second, after) = real_device();
+        let (mut station, _) = station([Ok(first), Ok(second)]);
+        let mut settings = Settings::unknown();
+        settings.mixer.faders = [Channel::Music, Channel::Chat, Channel::Mic, Channel::System];
+        settings.mixer.volumes[usize::from(Channel::Music.index())] = Some(99);
+        settings.mic.de_esser = 15;
+
+        // On the virtual device first.
+        station.load(settings.clone()).unwrap();
+        assert_eq!(station.settings(), &settings);
+        let snapshot = station.poll().unwrap();
+        assert_eq!(snapshot.faders[0].channel, Channel::Music);
+        assert_eq!(snapshot.faders[0].volume, 99);
+        assert_eq!(snapshot.mic.de_esser, 15);
+
+        station.scan();
+        assert_eq!(before.hands.state().faders[0], Channel::Music);
+        assert_eq!(before.volumes_received(), [(Channel::Music, 99)]);
+
+        // Then on the real one, which drops right after.
+        settings.mic.de_esser = 30;
+        station.load(settings.clone()).unwrap();
+        assert_eq!(before.hands.state().effects[&EffectKey::DeEsser], 30);
+        before.unplugged.store(true, Ordering::Relaxed);
+        settings.mic.de_esser = 45;
+        station.load(settings.clone()).unwrap();
+        assert_eq!(station.connection(), &Connection::Demo);
+        assert!(station.awaits_return());
+        assert_eq!(station.poll().unwrap().mic.de_esser, 45);
+
+        station.scan();
+        assert_eq!(after.hands.state().effects[&EffectKey::DeEsser], 45);
     }
 
     #[test]
@@ -436,9 +584,11 @@ mod tests {
         before.unplugged.store(true, Ordering::Relaxed);
         station.apply(Intent::SetDeEsser { amount: 10 }).unwrap();
         assert_eq!(station.connection(), &Connection::Demo);
+        // The virtual device shows what the real one was set to; the setting
+        // it never received was not kept.
         let demo = station.poll().unwrap();
         assert_eq!(demo.device.kind, "virtual");
-        assert_eq!(demo.mic.de_esser, 0);
+        assert_eq!(demo.mic, shown);
 
         station.scan();
         station.scan();
@@ -557,11 +707,21 @@ mod tests {
         assert_eq!(bench.volumes_received(), []);
         assert_eq!(station.poll().unwrap().channels[8].volume, Some(60));
 
+        // The real one is brought to what was set, then answers itself.
         station.scan();
-        assert_eq!(station.poll().unwrap().channels[8].volume, None);
-        station.apply(intent).unwrap();
         assert_eq!(bench.volumes_received(), [(Channel::Headphones, 60)]);
-        assert_eq!(station.poll().unwrap().channels[8].volume, Some(60));
+        assert_eq!(station.poll().unwrap().channels[9].volume, None);
+        station
+            .apply(Intent::SetVolume {
+                channel: Channel::MicMonitor,
+                volume: 80,
+            })
+            .unwrap();
+        assert_eq!(
+            bench.volumes_received(),
+            [(Channel::Headphones, 60), (Channel::MicMonitor, 80)]
+        );
+        assert_eq!(station.poll().unwrap().channels[9].volume, Some(80));
     }
 
     #[test]
