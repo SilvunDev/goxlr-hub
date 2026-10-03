@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-dark.svg">
+    <img src="assets/brand/logo-light.svg" alt="GoXLR Hub" width="334">
+  </picture>
+</p>
+
 # GoXLR Hub
 
 An open source control app for the TC-Helicon GoXLR, built around plugins.
@@ -34,6 +41,11 @@ Work is tracked with [milestones](../../milestones), one per stage:
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Brand
+
+Logo, colours and typefaces are described in
+[assets/brand](assets/brand/README.md).
 
 ## Credits
 
