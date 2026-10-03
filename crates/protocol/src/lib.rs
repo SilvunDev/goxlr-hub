@@ -6,12 +6,17 @@
 //! hardware.
 
 mod error;
+mod mic;
 mod packet;
 mod request;
 mod response;
 mod types;
 
 pub use error::ProtocolError;
+pub use mic::{
+    COMPRESSOR_ATTACK_MS, COMPRESSOR_RATIOS, COMPRESSOR_RELEASE_MS, EffectKey, EqBand,
+    GATE_TIMES_MS, MicParamKey, eq_frequency_value, gate_attenuation_db,
+};
 pub use packet::{HEADER_LEN, Packet};
 pub use request::Request;
 pub use response::{

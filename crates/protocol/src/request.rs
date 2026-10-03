@@ -1,6 +1,6 @@
 use crate::{
-    ButtonLights, Channel, Fader, MicType, OutputSet, ProtocolError, RoutingInput, RoutingOutput,
-    Side,
+    ButtonLights, Channel, EffectKey, Fader, MicParamKey, MicType, OutputSet, ProtocolError,
+    RoutingInput, RoutingOutput, Side,
 };
 
 /// Size of a routing body on a full-size GoXLR.
@@ -25,7 +25,7 @@ const MIC_PARAM_TYPE: u32 = 0;
 const EFFECT_MIC_INPUT_MUTE: u32 = 0x0158;
 
 /// A command the app sends to the device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Request {
     /// Restarts the command counter of the session.
     ResetCommandIndex,
@@ -66,6 +66,17 @@ pub enum Request {
         mic_type: MicType,
         gain: u16,
     },
+    /// Sets one setting of the microphone processing, as an effect.
+    SetEffect {
+        key: EffectKey,
+        value: i32,
+    },
+    /// Sets one setting of the gate or of the compressor, as a microphone
+    /// parameter.
+    SetMicParam {
+        key: MicParamKey,
+        value: f32,
+    },
 }
 
 fn id(family: u32, parameter: u8) -> u32 {
@@ -93,8 +104,8 @@ impl Request {
             Self::SetMuted { channel, .. } => id(FAMILY_MUTE, channel.index()),
             Self::SetRouting { input, side, .. } => id(FAMILY_ROUTING, input.id(side)),
             Self::SetButtonLights { .. } => id(FAMILY_BUTTON_LIGHTS, 0),
-            Self::SetMicInputMuted { .. } => id(FAMILY_EFFECTS, 0),
-            Self::SetMicGain { .. } => id(FAMILY_MIC_PARAMS, 0),
+            Self::SetMicInputMuted { .. } | Self::SetEffect { .. } => id(FAMILY_EFFECTS, 0),
+            Self::SetMicGain { .. } | Self::SetMicParam { .. } => id(FAMILY_MIC_PARAMS, 0),
         }
     }
 
@@ -130,6 +141,18 @@ impl Request {
                 body.extend_from_slice(&[phantom_power, 0, 0, 0]);
                 body.extend_from_slice(&gain_key(mic_type).to_le_bytes());
                 body.extend_from_slice(&[0, 0, gain[0], gain[1]]);
+                body
+            }
+            Self::SetEffect { key, value } => {
+                let mut body = Vec::with_capacity(8);
+                body.extend_from_slice(&key.id().to_le_bytes());
+                body.extend_from_slice(&value.to_le_bytes());
+                body
+            }
+            Self::SetMicParam { key, value } => {
+                let mut body = Vec::with_capacity(8);
+                body.extend_from_slice(&key.id().to_le_bytes());
+                body.extend_from_slice(&value.to_le_bytes());
                 body
             }
         }
@@ -210,14 +233,35 @@ impl Request {
                 match (word(0), word(4)) {
                     (EFFECT_MIC_INPUT_MUTE, 0) => Ok(Self::SetMicInputMuted { muted: false }),
                     (EFFECT_MIC_INPUT_MUTE, 1) => Ok(Self::SetMicInputMuted { muted: true }),
-                    _ => Err(ProtocolError::InvalidBody("no such effect parameter")),
+                    (EFFECT_MIC_INPUT_MUTE, _) => {
+                        Err(ProtocolError::InvalidBody("mute state must be 0 or 1"))
+                    }
+                    (key, value) => {
+                        let key = EffectKey::from_id(key)
+                            .ok_or(ProtocolError::InvalidBody("no such effect parameter"))?;
+                        Ok(Self::SetEffect {
+                            key,
+                            value: value.cast_signed(),
+                        })
+                    }
                 }
             }
             (FAMILY_MIC_PARAMS, 0) => {
-                expect_len(body, 16)?;
                 let key = |at: usize| {
                     u32::from_le_bytes([body[at], body[at + 1], body[at + 2], body[at + 3]])
                 };
+                // One parameter alone is a setting of the gate or of the
+                // compressor; the gain comes with the microphone type.
+                if body.len() == 8 {
+                    let value = f32::from_le_bytes([body[4], body[5], body[6], body[7]]);
+                    if !value.is_finite() {
+                        return Err(ProtocolError::InvalidBody("not a number"));
+                    }
+                    let key = MicParamKey::from_id(key(0))
+                        .ok_or(ProtocolError::InvalidBody("no such microphone parameter"))?;
+                    return Ok(Self::SetMicParam { key, value });
+                }
+                expect_len(body, 16)?;
                 if key(0) != MIC_PARAM_TYPE {
                     return Err(ProtocolError::InvalidBody("microphone type expected first"));
                 }
@@ -246,7 +290,7 @@ fn expect_len(body: &[u8], expected: usize) -> Result<(), ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Button, ButtonLight};
+    use crate::{Button, ButtonLight, EqBand};
 
     fn bytes(request: Request) -> (u32, Vec<u8>) {
         (request.command_id(), request.body())
@@ -385,6 +429,35 @@ mod tests {
     }
 
     #[test]
+    fn set_effect_sends_the_key_then_a_signed_value() {
+        let threshold = Request::SetEffect {
+            key: EffectKey::GateThreshold,
+            value: -30,
+        };
+        assert_eq!(
+            bytes(threshold),
+            (0x0080_1000, vec![0x11, 0, 0, 0, 0xe2, 0xff, 0xff, 0xff])
+        );
+        let gain = Request::SetEffect {
+            key: EffectKey::EqGain(EqBand::Khz16),
+            value: 9,
+        };
+        assert_eq!(gain.body(), [0x30, 0x01, 0, 0, 9, 0, 0, 0]);
+    }
+
+    #[test]
+    fn set_mic_param_sends_the_key_then_a_float() {
+        let ratio = Request::SetMicParam {
+            key: MicParamKey::CompressorRatio,
+            value: 2.5,
+        };
+        assert_eq!(
+            bytes(ratio),
+            (0x0080_b000, vec![0x00, 0x03, 0x06, 0, 0, 0, 0x20, 0x40])
+        );
+    }
+
+    #[test]
     fn every_request_decodes_back_to_itself() {
         let mut requests = vec![
             Request::ResetCommandIndex,
@@ -431,6 +504,16 @@ mod tests {
         for mic_type in MicType::ALL {
             for gain in [0, 72, u16::MAX] {
                 requests.push(Request::SetMicGain { mic_type, gain });
+            }
+        }
+        for key in EffectKey::all() {
+            for value in [i32::MIN, -61, 0, 231] {
+                requests.push(Request::SetEffect { key, value });
+            }
+        }
+        for key in MicParamKey::ALL {
+            for value in [-61.0, 0.0, 1.1, 64.0] {
+                requests.push(Request::SetMicParam { key, value });
             }
         }
 
@@ -487,7 +570,9 @@ mod tests {
         invalid(0x0080_1000, &[0x59, 0x01, 0, 0, 1, 0, 0, 0]); // another effect
         invalid(0x0080_8000, &[2; 23]);
         invalid(0x0080_8000, &[9; 24]); // no such light
-        invalid(0x0080_b000, &[0; 8]);
+        invalid(0x0080_b000, &[0; 8]); // key 0 alone is no parameter
+        invalid(0x0080_b000, &[0x00, 0x02, 0x03, 0, 0, 0, 0xc0, 0x7f]); // not a number
+        invalid(0x0080_b000, &[0x00, 0x01, 0x07, 0, 0, 0, 0, 0]); // bleep level: not handled
         invalid(0x0080_b000, &[0; 16]); // gain key 0 is not a gain
         invalid(
             0x0080_b000,
