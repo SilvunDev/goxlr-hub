@@ -1347,10 +1347,38 @@ dependencies = [
 name = "goxlr-hub"
 version = "0.0.0"
 dependencies = [
+ "goxlr-hub-core",
+ "goxlr-hub-device",
  "sys-locale",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
+]
+
+[[package]]
+name = "goxlr-hub-core"
+version = "0.0.0"
+dependencies = [
+ "goxlr-hub-device",
+ "goxlr-hub-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "goxlr-hub-device"
+version = "0.0.0"
+dependencies = [
+ "goxlr-hub-protocol",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "goxlr-hub-protocol"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -12,6 +12,8 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+goxlr-hub-core = { path = "../core" }
+goxlr-hub-device = { path = "../device" }
 sys-locale = "0.3"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"

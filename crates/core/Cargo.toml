@@ -1,0 +1,17 @@
+[package]
+name = "goxlr-hub-core"
+description = "State of GoXLR Hub: what the app knows about the device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+goxlr-hub-device = { path = "../device" }
+goxlr-hub-protocol = { path = "../protocol", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

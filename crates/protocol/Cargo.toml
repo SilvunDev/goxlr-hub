@@ -1,0 +1,16 @@
+[package]
+name = "goxlr-hub-protocol"
+description = "The command language of the GoXLR: encoding and decoding, no hardware access"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+thiserror = "2"

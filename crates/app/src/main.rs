@@ -1,6 +1,7 @@
 // Hides the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod device_feed;
 mod locale;
 mod tray;
 
@@ -43,6 +44,9 @@ fn main() {
                 eprintln!("no system tray icon, closing the window will quit: {error}");
             }
             app.manage(TrayAvailable(tray.is_ok()));
+            if let Err(error) = device_feed::start(app.handle()) {
+                eprintln!("no device to show: {error}");
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

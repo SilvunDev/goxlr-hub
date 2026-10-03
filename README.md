@@ -18,7 +18,8 @@ https://github.com/user-attachments/assets/a97958d0-c720-4854-b838-77a2eee86ec4
 ## Status
 
 Early development. The app opens, shows its frame in English or French and
-lives in the system tray; it does not talk to the device yet.
+lives in the system tray. It speaks the GoXLR protocol to a built-in virtual
+device, shown in demo mode; it does not talk to a real GoXLR yet.
 
 ## Goals
 
@@ -52,7 +53,12 @@ pnpm install
 pnpm tauri dev
 ```
 
-The Rust code lives in `crates/`, the interface (Svelte) in `ui/`.
+The Rust code lives in `crates/`, the interface (Svelte) in `ui/`:
+
+- `protocol`: the command language of the device, with no hardware access.
+- `device`: one device interface, and the virtual device behind it.
+- `core`: what the app knows about the device.
+- `app`: the desktop shell.
 
 ## Contributing
 
