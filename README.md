@@ -18,9 +18,15 @@ https://github.com/user-attachments/assets/a97958d0-c720-4854-b838-77a2eee86ec4
 ## Status
 
 Early development. The app opens, shows its frame in English or French and
-lives in the system tray. It connects to a full-size GoXLR, shows its identity
-and follows its faders live; it cannot change anything on the device yet.
-Without a GoXLR it shows a built-in virtual device, in demo mode.
+lives in the system tray. It connects to a full-size GoXLR and drives its
+mixer in both directions: volumes, mutes and the channel under each fader are
+set from the screen, and the screen follows the faders and mute buttons of the
+device. Routing, microphone and profiles are not there yet. Without a GoXLR it
+shows a built-in virtual device, in demo mode.
+
+When it takes the GoXLR over, the app sends the mutes and the fader
+assignment, which the device cannot tell: every channel starts live, on the
+default faders (Mic, Chat, Music, System). Volumes are left as they are.
 
 - **Windows**: the official TC-Helicon driver must be installed.
 - **Linux**: built and tested by CI, not tried on a real device yet.

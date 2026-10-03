@@ -5,8 +5,10 @@ mod device_feed;
 mod locale;
 mod tray;
 
-use tauri::{AppHandle, Manager, WindowEvent};
+use goxlr_hub_core::Intent;
+use tauri::{AppHandle, Manager, State, WindowEvent};
 
+use device_feed::Intents;
 use locale::Locale;
 
 /// Whether the tray icon exists. Without it a hidden window could never be
@@ -22,6 +24,16 @@ enum CloseAction {
 #[tauri::command]
 fn set_locale(app: AppHandle, tag: String) -> Result<(), String> {
     tray::set_locale(&app, Locale::from_tag(&tag)).map_err(|error| error.to_string())
+}
+
+/// Passes on what the interface asks of the mixer. The answer is the next
+/// state of the device.
+#[tauri::command]
+fn mixer_intent(intents: State<'_, Option<Intents>>, intent: Intent) -> Result<(), String> {
+    let Some(Intents(sender)) = intents.inner() else {
+        return Err("no device to drive".into());
+    };
+    sender.send(intent).map_err(|error| error.to_string())
 }
 
 fn close_action(tray_available: bool) -> CloseAction {
@@ -44,9 +56,11 @@ fn main() {
                 eprintln!("no system tray icon, closing the window will quit: {error}");
             }
             app.manage(TrayAvailable(tray.is_ok()));
-            if let Err(error) = device_feed::start(app.handle()) {
+            let intents = device_feed::start(app.handle());
+            if let Err(error) = &intents {
                 eprintln!("no device to show: {error}");
             }
+            app.manage(intents.ok());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -58,7 +72,7 @@ fn main() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![set_locale])
+        .invoke_handler(tauri::generate_handler![set_locale, mixer_intent])
         .run(tauri::generate_context!())
         .expect("failed to run GoXLR Hub");
 }

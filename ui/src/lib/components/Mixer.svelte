@@ -10,7 +10,6 @@
 <section class="mixer">
   <h1>{i18n.t.nav.mixer}</h1>
   {#if device}
-    <p class="hint">{i18n.t.mixer.readOnly}</p>
     <div class="board">
       <div class="faders">
         {#each device.faders as view (view.fader)}

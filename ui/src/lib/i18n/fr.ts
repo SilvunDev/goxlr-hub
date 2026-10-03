@@ -42,11 +42,18 @@ export const fr: Messages = {
   },
   mixer: {
     connecting: 'Connexion…',
-    readOnly: 'Aperçu : vous pourrez manipuler ces commandes dans une prochaine version.',
     fader: 'Fader',
+    source: 'Piste du fader {fader}',
+    mute: 'Couper {channel}',
     muted: 'Coupé',
     live: 'Ouvert',
     micLevel: 'Niveau du micro',
+  },
+  channelList: {
+    hint: 'Le volume de chaque piste, y compris celles qui ne sont sur aucun fader.',
+    unknown: 'Inconnu',
+    unknownHint:
+      'La GoXLR ne sait pas dire le volume d’une piste qui n’est sur aucun fader. Il s’affiche ici dès que vous le réglez.',
   },
   device: {
     title: 'Appareil',
