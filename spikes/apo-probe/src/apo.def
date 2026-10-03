@@ -1,0 +1,4 @@
+LIBRARY goxlrhub_apo_probe
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow   PRIVATE
