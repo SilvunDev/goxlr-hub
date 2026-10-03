@@ -21,7 +21,7 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How often a GoXLR that dropped is looked for: until the app has it
 /// again, it plays with its own settings.
-const RETURN_SCAN_INTERVAL: Duration = Duration::from_millis(200);
+const RETURN_SCAN_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The USB port of the computer.
 struct UsbPort;

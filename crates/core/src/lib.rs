@@ -240,21 +240,25 @@ impl Hub {
             travels: [None; Fader::COUNT],
             held: None,
         };
+        // A device that was just plugged in plays with its own settings:
+        // what silences is sent first.
+        for (input, outputs) in RoutingInput::ALL.into_iter().zip(hub.mixer.routing) {
+            hub.device.set_routing(input, outputs)?;
+        }
+        for channel in Channel::ALL {
+            if channel != Channel::Mic {
+                let muted = hub.mixer.muted[usize::from(channel.index())];
+                hub.device.set_muted(channel, muted)?;
+            }
+        }
+        hub.send_mic(hub.mixer.mic_silenced())?;
         for (fader, channel) in Fader::ALL.into_iter().zip(hub.mixer.faders) {
             hub.device.set_fader(fader, channel)?;
         }
         for channel in Channel::ALL {
-            let index = usize::from(channel.index());
-            if let Some(volume) = hub.mixer.volumes[index] {
+            if let Some(volume) = hub.mixer.volumes[usize::from(channel.index())] {
                 hub.send_volume(channel, volume)?;
             }
-            if channel != Channel::Mic {
-                hub.device.set_muted(channel, hub.mixer.muted[index])?;
-            }
-        }
-        hub.send_mic(hub.mixer.mic_silenced())?;
-        for (input, outputs) in RoutingInput::ALL.into_iter().zip(hub.mixer.routing) {
-            hub.device.set_routing(input, outputs)?;
         }
         hub.send_lights()?;
         Ok(hub)

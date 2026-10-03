@@ -333,8 +333,19 @@ mod tests {
         station.poll().unwrap();
 
         let settings = bench.settings_received();
+        // What silences comes first: until then the device plays as it
+        // pleases.
+        assert!(
+            settings[..16]
+                .iter()
+                .all(|request| matches!(request, Request::SetRouting { .. }))
+        );
+        assert!(settings[16..28].iter().all(|request| matches!(
+            request,
+            Request::SetMuted { .. } | Request::SetMicInputMuted { .. }
+        )));
         assert_eq!(
-            settings[..4],
+            settings[28..32],
             [
                 (Fader::A, Channel::Mic),
                 (Fader::B, Channel::Chat),
