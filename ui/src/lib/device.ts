@@ -157,8 +157,64 @@ export interface MicView {
   deEsser: number;
 }
 
+/** A part of the microphone processing that can be put back to neutral. */
+export type MicBlockId = 'gate' | 'compressor' | 'equalizer' | 'deEsser' | 'all';
+
+/** What can be saved under a name: a profile, or one of the pieces it is made of. */
+export type ProfileKind = 'profile' | 'mix' | 'mic';
+
+export const PROFILE_KINDS: readonly ProfileKind[] = ['profile', 'mix', 'mic'];
+
+export interface ProfilesView {
+  /** The names of what is in use. */
+  active: Record<ProfileKind, string>;
+  profiles: string[];
+  mixes: string[];
+  mics: string[];
+  /** What differs from what is saved. `profile`: it is made of other pieces. */
+  dirty: Record<ProfileKind, boolean>;
+  /** Something was changed and not saved. */
+  unsaved: boolean;
+}
+
+/** What the interface asks of the profiles. The answer says whether it was done. */
+export type ProfileCommand =
+  | { type: 'select'; kind: ProfileKind; name: string }
+  | { type: 'save'; kind: ProfileKind }
+  | { type: 'saveAs'; kind: ProfileKind; name: string }
+  | { type: 'rename'; kind: ProfileKind; name: string; to: string }
+  | { type: 'duplicate'; kind: ProfileKind; name: string; to: string }
+  | { type: 'delete'; kind: ProfileKind; name: string };
+
+export const PROFILE_ERRORS = [
+  'invalidName',
+  'nameTaken',
+  'inUse',
+  'notFound',
+  'unreadable',
+  'storage',
+] as const;
+
+/** Why a profile could not be saved, loaded or changed. */
+export type ProfileError = (typeof PROFILE_ERRORS)[number];
+
+/** The sampler buttons, as the device names them. */
+export const PAD_BANKS = ['samplerSelectA', 'samplerSelectB', 'samplerSelectC'] as const;
+
+export const PADS = [
+  'samplerTopLeft',
+  'samplerTopRight',
+  'samplerBottomLeft',
+  'samplerBottomRight',
+] as const;
+
+export const PAD_CLEAR = 'samplerClear';
+
+export type PadId = (typeof PAD_BANKS)[number] | (typeof PADS)[number] | typeof PAD_CLEAR;
+
 /** What the interface asks of the device. The answer is the next snapshot. */
 export type Intent =
+  | { type: 'resetMic'; block: MicBlockId }
   | { type: 'setMicType'; micType: MicTypeId }
   | { type: 'setMicGain'; gain: number }
   | { type: 'setGate'; setting: GateSettingId; value: number }
@@ -203,6 +259,21 @@ export interface Snapshot {
   micLevelDb: number;
   /** How the microphone is plugged in and processed. */
   mic: MicView;
+  /** What is saved, what is in use and what changed since. */
+  profiles?: ProfilesView;
+}
+
+/** The profiles of a snapshot, or nothing when the Rust side did not tell them. */
+export function profilesOf(snapshot: Snapshot): ProfilesView | null {
+  const profiles = snapshot.profiles;
+  const told =
+    profiles &&
+    profiles.active &&
+    profiles.dirty &&
+    [profiles.profiles, profiles.mixes, profiles.mics].every(Array.isArray) &&
+    typeof profiles.active.profile === 'string' &&
+    profiles.active.profile !== '';
+  return told ? profiles : null;
 }
 
 /** A volume as a whole percentage. */

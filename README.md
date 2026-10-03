@@ -23,15 +23,25 @@ mixer in both directions: volumes, mutes and the channel under each fader are
 set from the screen, and the screen follows the faders and mute buttons of the
 device. The routing grid chooses which source goes to which output. The
 microphone section sets the microphone type and gain, the noise gate, the
-compressor, the equaliser and the de-esser, next to a live level meter.
-Profiles are not there yet. Without a GoXLR it shows a built-in virtual
-device, in demo mode.
+compressor, the equaliser and the de-esser, next to a live level meter, and
+each of them goes back to neutral with one button. Without a GoXLR it shows a
+built-in virtual device, in demo mode, where profiles can be prepared.
 
-When it takes the GoXLR over, the app sends the mutes, the fader assignment,
-the routing and the microphone processing, which the device cannot tell: every
-channel starts live, on the default faders (Mic, Chat, Music, System), with a
-default routing and a neutral gate, compressor and equaliser. Volumes are left
-as they are, and so are the microphone type and gain until you choose them.
+Settings reach the GoXLR at once and are saved when you ask: a banner says
+when something is not saved, and quitting asks first. A profile is made of
+pieces saved apart, a mix (faders, volumes, routing) and a microphone, so that
+one can be changed without the other; controls and lighting will join them.
+Mutes are not part of a profile. Profiles are plain TOML files in the
+configuration folder of the app.
+
+On launch the app brings the GoXLR to the last profile. The first time, it
+makes a profile that leaves the volumes as they are, and the microphone type
+and gain too until you choose them; every channel starts live, on the default
+faders (Mic, Chat, Music, System), with a default routing and a neutral gate,
+compressor and equaliser.
+
+The app can start with the computer (Settings). Started that way it stays in
+the system tray unless you choose otherwise.
 
 The GoXLR keeps no settings of its own. When it is plugged in again it plays
 with everything open until the app takes it back, a fraction of a second
@@ -81,7 +91,8 @@ The Rust code lives in `crates/`, the interface (Svelte) in `ui/`:
   libusb on Linux).
 - `device`: one device interface, with the real or the virtual device behind
   it.
-- `core`: what the app knows about the device, and which device it shows.
+- `core`: what the app knows about the device, which device it shows, and
+  the profiles.
 - `app`: the desktop shell.
 
 ## Contributing

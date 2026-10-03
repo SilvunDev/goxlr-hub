@@ -9,4 +9,5 @@ export const sections = [
   'plugins',
 ] as const;
 
-export type SectionId = (typeof sections)[number] | 'settings';
+/** Profiles are opened from the header, settings from the foot of the menu. */
+export type SectionId = (typeof sections)[number] | 'profiles' | 'settings';

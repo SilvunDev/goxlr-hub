@@ -5,6 +5,7 @@
   import FaderStrip from './FaderStrip.svelte';
   import MicMeter from './MicMeter.svelte';
   import MuteButton from './MuteButton.svelte';
+  import Pads from './Pads.svelte';
 
   let { device }: { device: Snapshot | null } = $props();
 </script>
@@ -18,6 +19,7 @@
           <FaderStrip {view} />
         {/each}
       </div>
+      <Pads pressed={Array.isArray(device.pressed) ? device.pressed : []} />
       <aside>
         <MicMeter levelDb={device.micLevelDb} />
         <div class="mic">

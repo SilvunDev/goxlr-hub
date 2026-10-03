@@ -1,26 +1,53 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { onDeviceState } from './lib/backend';
+  import { onDeviceState, onQuitRequested, quit, runProfileCommand } from './lib/backend';
   import Channels from './lib/components/Channels.svelte';
   import ComingSoon from './lib/components/ComingSoon.svelte';
   import Header from './lib/components/Header.svelte';
   import Mic from './lib/components/Mic.svelte';
   import Mixer from './lib/components/Mixer.svelte';
+  import Profiles from './lib/components/Profiles.svelte';
+  import QuitDialog from './lib/components/QuitDialog.svelte';
   import Routing from './lib/components/Routing.svelte';
   import Settings from './lib/components/Settings.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
   import StatusBanner from './lib/components/StatusBanner.svelte';
-  import { connectionOf, type Snapshot } from './lib/device';
+  import UnsavedBanner from './lib/components/UnsavedBanner.svelte';
+  import { connectionOf, profilesOf, type ProfileError, type Snapshot } from './lib/device';
   import { i18n } from './lib/i18n/index.svelte';
   import type { SectionId } from './lib/nav';
 
   let current = $state<SectionId>('mixer');
   // Replaced as a whole many times a second: no need to track its fields.
   let device = $state.raw<Snapshot | null>(null);
+  /** The user asked to quit while something is not saved. */
+  let quitting = $state(false);
+  let saveError = $state<ProfileError | null>(null);
 
   const connection = $derived(device ? connectionOf(device) : null);
+  const profiles = $derived(device ? profilesOf(device) : null);
 
-  onMount(() => onDeviceState((snapshot) => (device = snapshot)));
+  onMount(() => {
+    const stopDevice = onDeviceState((snapshot) => (device = snapshot));
+    const stopQuit = onQuitRequested(() => {
+      saveError = null;
+      quitting = true;
+    });
+    return () => {
+      stopDevice();
+      stopQuit();
+    };
+  });
+
+  /** Saves the profile in use with its pieces. Says whether it was done. */
+  async function save(): Promise<boolean> {
+    saveError = await runProfileCommand({ type: 'save', kind: 'profile' });
+    return saveError === null;
+  }
+
+  async function saveAndQuit() {
+    if (await save()) await quit();
+  }
 </script>
 
 <div class="frame">
@@ -30,11 +57,20 @@
       {#if connection && connection.state !== 'hardware'}
         <StatusBanner {connection} />
       {/if}
-      <Header />
+      {#if profiles?.unsaved}
+        <UnsavedBanner error={quitting ? null : saveError} onsave={save} />
+      {/if}
+      <Header
+        {profiles}
+        managing={current === 'profiles'}
+        onmanage={() => (current = 'profiles')}
+      />
     </div>
     <main>
       {#if current === 'settings'}
         <Settings />
+      {:else if current === 'profiles'}
+        <Profiles {profiles} />
       {:else if current === 'mixer'}
         <Mixer {device} />
       {:else if current === 'mic'}
@@ -49,6 +85,15 @@
     </main>
   </div>
 </div>
+
+{#if quitting}
+  <QuitDialog
+    error={saveError}
+    onsave={saveAndQuit}
+    ondiscard={quit}
+    oncancel={() => (quitting = false)}
+  />
+{/if}
 
 <style>
   .frame {
