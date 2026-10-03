@@ -46,6 +46,12 @@ function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
       { channel: 'headphones', volume: null, muted: false, fader: null },
     ],
     micOff: false,
+    routing: [
+      { input: 'mic', outputs: ['broadcastMix', 'chatMic'] },
+      { input: 'chat', outputs: ['headphones'] },
+      { input: 'music', outputs: ['headphones', 'broadcastMix', 'lineOut'] },
+      { input: 'samples', outputs: [] },
+    ],
     pressed: [],
     micLevelDb: -23.44,
     ...overrides,
@@ -94,7 +100,7 @@ describe('App', () => {
 
   it('still marks the sections that are not built as coming soon', async () => {
     render(App);
-    await fireEvent.click(screen.getByRole('button', { name: 'Routing' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Controls' }));
     expect(screen.getByText('Coming soon')).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Mixer' }));
     expect(screen.queryByText(/later version/)).toBeNull();
@@ -371,6 +377,113 @@ describe('App', () => {
       render(App);
       await fireEvent.click(screen.getByRole('button', { name: 'Channels' }));
       expect(screen.getByText('Connecting…')).toBeTruthy();
+    });
+  });
+
+  describe('on the routing section', () => {
+    async function open(state: unknown = snapshot()) {
+      render(App);
+      await report(state);
+      await fireEvent.click(screen.getByRole('button', { name: 'Routing' }));
+    }
+
+    const cell = (name: string) => screen.getByRole('checkbox', { name });
+
+    it('draws one row per source it is told about and one column per output', async () => {
+      await open();
+      expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Routing');
+      expect(
+        screen.getAllByRole('columnheader').map((header) => header.textContent?.trim()),
+      ).toEqual([
+        'Source',
+        'Headphones',
+        'Broadcast Mix',
+        'Line Out',
+        'Chat Mic',
+        'Sampler',
+      ]);
+      expect(screen.getAllByRole('rowheader').map((header) => header.textContent?.trim())).toEqual([
+        'Mic',
+        'Chat',
+        'Music',
+        'Samples',
+      ]);
+      expect(screen.getAllByRole('checkbox')).toHaveLength(20);
+    });
+
+    it('ticks the outputs each source is sent to', async () => {
+      await open();
+      expect(cell('Mic to Broadcast Mix').getAttribute('aria-checked')).toBe('true');
+      expect(cell('Mic to Chat Mic').getAttribute('aria-checked')).toBe('true');
+      expect(cell('Mic to Headphones').getAttribute('aria-checked')).toBe('false');
+      expect(cell('Music to Line Out').getAttribute('aria-checked')).toBe('true');
+      expect(cell('Samples to Headphones').getAttribute('aria-checked')).toBe('false');
+      expect(
+        screen.getAllByRole('checkbox').filter((box) => box.getAttribute('aria-checked') === 'true'),
+      ).toHaveLength(6);
+    });
+
+    it('asks to send a source to an output, or to stop', async () => {
+      await open();
+      await fireEvent.click(cell('Mic to Headphones'));
+      await fireEvent.click(cell('Music to Broadcast Mix'));
+      expect(feed.sent).toEqual([
+        { type: 'setRoute', input: 'mic', output: 'headphones', on: true },
+        { type: 'setRoute', input: 'music', output: 'broadcastMix', on: false },
+      ]);
+    });
+
+    it('keeps showing what the device says, not what was clicked', async () => {
+      await open();
+      await fireEvent.click(cell('Mic to Headphones'));
+      await report(snapshot());
+      expect(cell('Mic to Headphones').getAttribute('aria-checked')).toBe('false');
+
+      const state = snapshot();
+      state.routing[0].outputs = ['headphones'];
+      await report(state);
+      expect(cell('Mic to Headphones').getAttribute('aria-checked')).toBe('true');
+      expect(cell('Mic to Chat Mic').getAttribute('aria-checked')).toBe('false');
+    });
+
+    it('does not let a sound be sent back to where it comes from', async () => {
+      await open();
+      for (const name of ['Chat to Chat Mic', 'Samples to Sampler']) {
+        const loop = cell(name) as HTMLButtonElement;
+        expect(loop.disabled).toBe(true);
+        expect(loop.getAttribute('aria-checked')).toBe('false');
+        await fireEvent.click(loop);
+      }
+      expect(feed.sent).toEqual([]);
+      expect((cell('Samples to Chat Mic') as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.getByText(/back to where it comes from/)).toBeTruthy();
+    });
+
+    it('never ticks a loop, even if the device says so', async () => {
+      const state = snapshot();
+      state.routing[1].outputs = ['chatMic'];
+      await open(state);
+      expect(cell('Chat to Chat Mic').getAttribute('aria-checked')).toBe('false');
+    });
+
+    it('waits for the device, and for a device that tells its routing', async () => {
+      render(App);
+      await fireEvent.click(screen.getByRole('button', { name: 'Routing' }));
+      expect(screen.getByText('Connecting…')).toBeTruthy();
+
+      const { routing: _, ...old } = snapshot();
+      await report(old);
+      expect(screen.getByText('Connecting…')).toBeTruthy();
+      expect(screen.queryByRole('checkbox')).toBeNull();
+    });
+
+    it('speaks French too', async () => {
+      await open();
+      i18n.setLocale('fr');
+      await tick();
+      expect(cell('Musique vers Casque').getAttribute('aria-checked')).toBe('true');
+      expect(screen.getByRole('columnheader', { name: /Mix de diffusion/ })).toBeTruthy();
+      expect(screen.getByRole('columnheader', { name: /Micro du chat/ })).toBeTruthy();
     });
   });
 

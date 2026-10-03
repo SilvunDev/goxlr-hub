@@ -49,12 +49,48 @@ export interface FaderView {
   muted: boolean;
 }
 
+export type RoutingInputId =
+  | 'mic'
+  | 'chat'
+  | 'music'
+  | 'game'
+  | 'console'
+  | 'lineIn'
+  | 'system'
+  | 'samples';
+
+export type RoutingOutputId = 'headphones' | 'broadcastMix' | 'chatMic' | 'sampler' | 'lineOut';
+
+/** The outputs, in the order of the columns of the routing grid. */
+export const ROUTING_OUTPUTS: readonly RoutingOutputId[] = [
+  'headphones',
+  'broadcastMix',
+  'lineOut',
+  'chatMic',
+  'sampler',
+];
+
+export interface RouteView {
+  input: RoutingInputId;
+  /** The outputs the input is sent to. */
+  outputs: RoutingOutputId[];
+}
+
+/** Two routes only feed a sound back to where it comes from. */
+export function canRoute(input: RoutingInputId, output: RoutingOutputId): boolean {
+  return !(
+    (input === 'chat' && output === 'chatMic') ||
+    (input === 'samples' && output === 'sampler')
+  );
+}
+
 /** What the interface asks of the device. The answer is the next snapshot. */
 export type Intent =
   | { type: 'setVolume'; channel: ChannelId; volume: number }
   | { type: 'setMuted'; channel: ChannelId; muted: boolean }
   | { type: 'setMicOff'; off: boolean }
-  | { type: 'assignFader'; fader: FaderId; channel: ChannelId };
+  | { type: 'assignFader'; fader: FaderId; channel: ChannelId }
+  | { type: 'setRoute'; input: RoutingInputId; output: RoutingOutputId; on: boolean };
 
 /**
  * Which device is shown, and why. Anything but `hardware` means the virtual
@@ -80,6 +116,8 @@ export interface Snapshot {
   channels: ChannelView[];
   /** The microphone itself is off, whatever its channel says. */
   micOff: boolean;
+  /** One row per input. */
+  routing: RouteView[];
   /** Buttons held down right now. */
   pressed: string[];
   /** Between -72.2 (silence) and 0 (full scale). */
