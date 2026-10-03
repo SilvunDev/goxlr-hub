@@ -75,25 +75,54 @@ describe('the equaliser drawing', () => {
     expect(flat.every((point) => point.y === 90)).toBe(true);
   });
 
-  it('bends the line towards a band that is turned up, and stays in the drawing', () => {
+  it('draws the line through every point', () => {
+    const bands = [
+      { frequency: 31.5, gain: 9 },
+      { frequency: 63, gain: 9 },
+      { frequency: 125, gain: -9 },
+      { frequency: 1000, gain: 4 },
+      { frequency: 1030, gain: -2 },
+      { frequency: 8000, gain: -6 },
+    ];
+    const points = curvePoints(bands, 720, 180);
+    for (const band of bands) {
+      const x = frequencyToX(band.frequency, 720);
+      const on = points.find((point) => point.x === x);
+      expect(on?.y, `${band.frequency} Hz`).toBeCloseTo(gainToY(band.gain, 180), 6);
+    }
+    // Left to right, and never above or below what the points ask for.
+    expect(points.every((point, at) => at === 0 || point.x >= points[at - 1].x)).toBe(true);
+    expect(points.every((point) => point.y >= 0 && point.y <= 180)).toBe(true);
+    // Flat beyond the first and the last point.
+    expect(points[0]).toEqual({ x: 0, y: 0 });
+    expect(points.at(-1)).toEqual({ x: 720, y: gainToY(-6, 180) });
+  });
+
+  it('does not overshoot between two points', () => {
     const points = curvePoints(
       [
-        { frequency: 1000, gain: 9 },
-        { frequency: 1200, gain: 9 },
-        { frequency: 8000, gain: -6 },
+        { frequency: 100, gain: 0 },
+        { frequency: 200, gain: 0 },
+        { frequency: 400, gain: 9 },
+        { frequency: 800, gain: 9 },
       ],
       720,
       180,
     );
-    const nearest = (hertz: number) => {
-      const x = frequencyToX(hertz, 720);
-      return points.reduce((best, point) =>
-        Math.abs(point.x - x) < Math.abs(best.x - x) ? point : best,
-      );
-    };
-    expect(nearest(1000).y).toBeLessThan(30);
-    expect(nearest(8000).y).toBeGreaterThan(120);
-    expect(nearest(40).y).toBeCloseTo(90, 0);
-    expect(points.every((point) => point.y >= 0 && point.y <= 180)).toBe(true);
+    const before = points.filter((point) => point.x <= frequencyToX(200, 720));
+    expect(before.every((point) => Math.abs(point.y - 90) < 1e-6)).toBe(true);
+  });
+
+  it('survives two bands at the same frequency, and no band at all', () => {
+    const stacked = curvePoints(
+      [
+        { frequency: 1500, gain: 3 },
+        { frequency: 1500, gain: -3 },
+      ],
+      720,
+      180,
+    );
+    expect(stacked.every((point) => Number.isFinite(point.y))).toBe(true);
+    expect(curvePoints([], 720, 180).every((point) => point.y === 90)).toBe(true);
   });
 });
