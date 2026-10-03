@@ -1,0 +1,3 @@
+mod scribble;
+
+fn main() {}

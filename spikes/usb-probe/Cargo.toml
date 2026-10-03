@@ -1,0 +1,11 @@
+[package]
+name = "usb-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1.47", features = ["rt-multi-thread", "sync"] }
+goxlr-usb = { git = "https://github.com/GoXLR-on-Linux/goxlr-utility", tag = "v1.2.4" }
+goxlr-types = { git = "https://github.com/GoXLR-on-Linux/goxlr-utility", tag = "v1.2.4" }
