@@ -1,0 +1,6 @@
+#!/bin/sh
+# Rejects commit messages that do not follow Conventional Commits.
+pattern='^(feat|fix|docs|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: .+'
+head -n1 "$1" | grep -Eq "$pattern" && exit 0
+echo "Commit message must follow Conventional Commits, e.g. 'feat: add fader volume'." >&2
+exit 1

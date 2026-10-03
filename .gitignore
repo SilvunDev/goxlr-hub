@@ -1,0 +1,15 @@
+# Build output
+target/
+dist/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: detect
+        shell: bash
+        run: echo "manifests=$(git ls-files '*Cargo.toml' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+      - if: steps.detect.outputs.manifests != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - if: steps.detect.outputs.manifests != '' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
+      - if: steps.detect.outputs.manifests != ''
+        uses: Swatinem/rust-cache@v2
+      - if: steps.detect.outputs.manifests != ''
+        shell: bash
+        run: |
+          for manifest in ${{ steps.detect.outputs.manifests }}; do
+            cargo fmt --manifest-path "$manifest" --all -- --check
+            cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings
+            cargo test --manifest-path "$manifest" --all
+          done

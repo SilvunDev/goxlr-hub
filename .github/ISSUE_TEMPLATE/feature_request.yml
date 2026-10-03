@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest something new
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: Describe the need, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed solution
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Where does it belong
+      options: [Core app, Plugin, Not sure]
+    validations:
+      required: true
