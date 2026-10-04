@@ -65,6 +65,56 @@ later: a source that was muted or routed away can be heard for that moment.
 - GoXLR Utility and the official app must be closed: the GoXLR can only be
   driven by one program at a time. GoXLR Hub tells you when one is running.
 
+## Install
+
+Download the file for your system from the
+[latest release](https://github.com/SilvunDev/goxlr-hub/releases/latest).
+
+| System | File |
+|---|---|
+| Windows 10 and 11 (64-bit) | `goxlr-hub_<version>_windows_x64-setup.exe` |
+| Debian, Ubuntu and relatives | `goxlr-hub_<version>_linux_amd64.deb` |
+| Fedora, openSUSE and relatives | `goxlr-hub_<version>_linux_x86_64.rpm` |
+| Any other Linux | `goxlr-hub_<version>_linux_x86_64.AppImage` |
+
+The installers are built by GitHub Actions from the tagged source, never on
+a personal computer.
+
+### Windows
+
+The installer is not code-signed yet. Windows shows "Windows protected your
+PC": choose **More info**, then **Run anyway**. The app installs for the
+current user and asks for no administrator rights.
+
+#### Windows driver
+
+GoXLR Hub talks to the GoXLR through the official TC-Helicon driver and
+never replaces it. The installer tells you when it is missing. Get it from
+the GoXLR page of [tc-helicon.com](https://www.tc-helicon.com/), under
+Downloads, install it, then start GoXLR Hub again. Without the driver the
+app opens in demo mode.
+
+### Linux
+
+The `.deb` and `.rpm` packages add a udev rule that lets you use the GoXLR
+without being root; plug the GoXLR in again after installing. With the
+AppImage, copy
+[`70-goxlr-hub.rules`](crates/app/installer/70-goxlr-hub.rules) to
+`/etc/udev/rules.d/` yourself.
+
+### Verify a download
+
+Every file of a release comes with a
+[build provenance attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations):
+proof that it was built by this repository's release workflow. With the
+[GitHub CLI](https://cli.github.com/):
+
+```bash
+gh attestation verify goxlr-hub_<version>_windows_x64-setup.exe --repo SilvunDev/goxlr-hub
+```
+
+`SHA256SUMS.txt`, next to the files, lists their checksums.
+
 ## Goals
 
 - A modern interface for the full-size GoXLR on Windows and Linux.

@@ -50,6 +50,12 @@ jobs:
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
           ./gitleaks git --redact --no-banner
 
+  # Builds the installers, to see one break before a release does. Nothing
+  # is published.
+  bundle:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/bundle.yml
+
   # Builds and tests the app. The job keeps its historical name because the
   # branch protection of main requires "rust (<os>)".
   rust:

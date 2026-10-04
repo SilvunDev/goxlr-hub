@@ -1,0 +1,74 @@
+name: Bundle
+
+# Builds the installers on GitHub-hosted runners and hands them over as
+# workflow artifacts. It only reads the repository: publishing is up to the
+# caller.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to build. Empty builds the calling commit.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Ubuntu still served: the packages then run on every
+        # newer system.
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev \
+            patchelf file
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bundle
+      - run: pnpm tauri build
+      # Gives the files names that do not change from one release to the
+      # next, apart from the version: the app looks for them by name.
+      - shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          version=$(jq -r .version crates/app/tauri.conf.json)
+          if [ -n "$TAG" ] && [ "v$version" != "$TAG" ]; then
+            echo "::error::the app is version $version, the release is $TAG"
+            exit 1
+          fi
+          bundles=target/release/bundle
+          mkdir out
+          if [ "$RUNNER_OS" = Windows ]; then
+            mv "$bundles"/nsis/*-setup.exe "out/goxlr-hub_${version}_windows_x64-setup.exe"
+          else
+            mv "$bundles"/deb/*.deb "out/goxlr-hub_${version}_linux_amd64.deb"
+            mv "$bundles"/rpm/*.rpm "out/goxlr-hub_${version}_linux_x86_64.rpm"
+            mv "$bundles"/appimage/*.AppImage "out/goxlr-hub_${version}_linux_x86_64.AppImage"
+          fi
+          ls -l out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bundle-${{ runner.os }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
