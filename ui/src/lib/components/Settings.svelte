@@ -3,6 +3,10 @@
   import { getStartup, setStartup, type Startup } from '../backend';
   import { i18n } from '../i18n/index.svelte';
   import { localeNames, locales } from '../i18n/locale';
+  import Updates from './Updates.svelte';
+
+  /** Something is not saved: installing another version would lose it. */
+  let { unsaved }: { unsaved: boolean } = $props();
 
   /** Nothing until the Rust side says how the app starts. */
   let startup = $state<Startup | null>(null);
@@ -70,6 +74,8 @@
       {/if}
     </fieldset>
   {/if}
+
+  <Updates {unsaved} />
 </section>
 
 <style>

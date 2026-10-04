@@ -13,9 +13,11 @@
   import Sidebar from './lib/components/Sidebar.svelte';
   import StatusBanner from './lib/components/StatusBanner.svelte';
   import UnsavedBanner from './lib/components/UnsavedBanner.svelte';
+  import UpdateBanner from './lib/components/UpdateBanner.svelte';
   import { connectionOf, profilesOf, type ProfileError, type Snapshot } from './lib/device';
   import { i18n } from './lib/i18n/index.svelte';
   import type { SectionId } from './lib/nav';
+  import { updates } from './lib/updates.svelte';
 
   let current = $state<SectionId>('mixer');
   // Replaced as a whole many times a second: no need to track its fields.
@@ -33,9 +35,11 @@
       saveError = null;
       quitting = true;
     });
+    const stopUpdates = updates.start();
     return () => {
       stopDevice();
       stopQuit();
+      stopUpdates();
     };
   });
 
@@ -60,6 +64,13 @@
       {#if profiles?.unsaved}
         <UnsavedBanner error={quitting ? null : saveError} onsave={save} />
       {/if}
+      {#if updates.announced && current !== 'settings'}
+        <UpdateBanner
+          version={updates.announced.version}
+          onsee={() => (current = 'settings')}
+          onlater={() => updates.postpone()}
+        />
+      {/if}
       <Header
         {profiles}
         managing={current === 'profiles'}
@@ -68,7 +79,7 @@
     </div>
     <main>
       {#if current === 'settings'}
-        <Settings />
+        <Settings unsaved={profiles?.unsaved ?? false} />
       {:else if current === 'profiles'}
         <Profiles {profiles} />
       {:else if current === 'mixer'}

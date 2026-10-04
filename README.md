@@ -39,6 +39,14 @@ of the app is neither loaded nor overwritten by an older one. The first time
 another version of the app starts, it copies the profiles to the `backups`
 folder next to them before touching anything; the ten latest copies are kept.
 
+The app tells when a new version is out and installs nothing by itself.
+Settings lists every published version: on Windows one click installs the one
+you choose, newer or older, after checking the download against the checksum
+GitHub publishes; on Linux it opens the download page. To know about new
+versions the app asks GitHub for the list of releases when it starts, then
+once a day. Nothing about you or your GoXLR is sent, and Settings turns it
+off.
+
 On launch the app brings the GoXLR to the last profile. The first time, it
 makes a profile that leaves the volumes as they are, and the microphone type
 and gain too until you choose them; every channel starts live, on the default
