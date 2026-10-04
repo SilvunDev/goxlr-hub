@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
 import type { ChannelId, FaderId, MicView, ProfilesView, Snapshot } from './lib/device';
 import { i18n } from './lib/i18n/index.svelte';
+import { updates } from './lib/updates.svelte';
 
 // Stands in for the Rust side: `feed.push` plays the device reporting its state.
 // `feed.sent` collects what the interface asks of the device.
@@ -18,6 +19,12 @@ const feed = vi.hoisted(() => ({
   startupFails: false,
   askToQuit: () => {},
   quits: 0,
+  updateSettings: null as { version: string; automatic: boolean; installs: boolean } | null,
+  published: 'offline' as unknown,
+  checks: 0,
+  installs: [] as string[],
+  installRefusal: null as string | null,
+  opened: [] as string[],
 }));
 
 vi.mock('./lib/backend', () => ({
@@ -34,6 +41,25 @@ vi.mock('./lib/backend', () => ({
     if (feed.startupFails) return null;
     feed.startup = startup;
     return startup;
+  },
+  getUpdateSettings: async () => feed.updateSettings,
+  setAutomaticUpdates: async (automatic: boolean) => {
+    if (feed.updateSettings) feed.updateSettings = { ...feed.updateSettings, automatic };
+    return feed.updateSettings;
+  },
+  getPublishedVersions: async () => {
+    feed.checks += 1;
+    return feed.published;
+  },
+  installVersion: async (version: string) => {
+    feed.installs.push(version);
+    return feed.installRefusal;
+  },
+  openRelease: async (version: string) => {
+    feed.opened.push(version);
+  },
+  openBackups: async () => {
+    feed.opened.push('backups');
   },
   onQuitRequested: (handler: () => void) => {
     feed.askToQuit = handler;
@@ -147,6 +173,13 @@ describe('App', () => {
     feed.startup = null;
     feed.startupFails = false;
     feed.quits = 0;
+    feed.updateSettings = null;
+    feed.published = 'offline';
+    feed.checks = 0;
+    feed.installs.length = 0;
+    feed.installRefusal = null;
+    feed.opened.length = 0;
+    updates.reset();
   });
 
   it('lists every section in order, then settings', () => {
@@ -1104,6 +1137,200 @@ describe('App', () => {
       await fireEvent.keyDown(window, { key: 'Escape' });
       expect(screen.queryByRole('alertdialog')).toBeNull();
       expect(feed.quits).toBe(0);
+    });
+  });
+
+  describe('with published versions', () => {
+    const published = (version: string, flags: Partial<Record<string, boolean>> = {}) => ({
+      version,
+      published: '2026-10-04T10:00:00Z',
+      current: false,
+      newer: false,
+      installable: true,
+      ...flags,
+    });
+    const three = [
+      published('0.3.0', { newer: true }),
+      published('0.2.0', { current: true }),
+      published('0.1.0'),
+    ];
+    const windows = { version: '0.2.0', automatic: true, installs: true };
+    const banner = () => screen.queryByRole('region', { name: 'New version' });
+
+    /** Lets the settings be read, then the versions. */
+    async function settle() {
+      for (let turn = 0; turn < 4; turn += 1) await tick();
+    }
+
+    async function start() {
+      render(App);
+      await settle();
+    }
+
+    async function openSettings() {
+      await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+      await settle();
+    }
+
+    it('tells about a newer version and installs nothing', async () => {
+      feed.updateSettings = windows;
+      feed.published = three;
+      await start();
+      expect(banner()?.textContent).toContain('GoXLR Hub 0.3.0 is out');
+      expect(feed.installs).toEqual([]);
+
+      await fireEvent.click(within(banner()!).getByRole('button', { name: 'See' }));
+      await settle();
+      expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
+      expect(banner()).toBeNull();
+    });
+
+    it('stops telling about a version the user put off', async () => {
+      feed.updateSettings = windows;
+      feed.published = three;
+      await start();
+      await fireEvent.click(within(banner()!).getByRole('button', { name: 'Later' }));
+      await settle();
+      expect(banner()).toBeNull();
+    });
+
+    it('says nothing when the version running is the latest', async () => {
+      feed.updateSettings = { ...windows, version: '0.3.0' };
+      feed.published = [published('0.3.0', { current: true }), published('0.2.0')];
+      await start();
+      expect(banner()).toBeNull();
+      await openSettings();
+      expect(screen.getByText('It is the latest version.')).toBeTruthy();
+    });
+
+    it('does not ask GitHub by itself when the user said not to', async () => {
+      feed.updateSettings = { ...windows, automatic: false };
+      feed.published = three;
+      await start();
+      expect(feed.checks).toBe(0);
+      expect(banner()).toBeNull();
+
+      await openSettings();
+      await fireEvent.click(screen.getByRole('button', { name: 'Look for versions now' }));
+      await settle();
+      expect(feed.checks).toBe(1);
+      expect(within(screen.getByRole('list', { name: 'Published versions' })).getAllByRole('listitem')).toHaveLength(3);
+    });
+
+    it('keeps a failed check to itself unless the user asked', async () => {
+      feed.updateSettings = windows;
+      await start();
+      await openSettings();
+      expect(screen.queryByRole('alert')).toBeNull();
+
+      await fireEvent.click(screen.getByRole('button', { name: 'Look for versions now' }));
+      await settle();
+      expect(screen.getByRole('alert').textContent).toContain('GitHub could not be reached');
+    });
+
+    it('turns the automatic check off and on', async () => {
+      feed.updateSettings = windows;
+      feed.published = three;
+      await start();
+      await openSettings();
+      const box = () => screen.getByRole('checkbox', { name: /Look for a new version/ }) as HTMLInputElement;
+      expect(box().checked).toBe(true);
+      await fireEvent.click(box());
+      await settle();
+      expect(feed.updateSettings?.automatic).toBe(false);
+      expect(box().checked).toBe(false);
+    });
+
+    it('installs the version the user chose, newer or older, once confirmed', async () => {
+      feed.updateSettings = windows;
+      feed.published = three;
+      await start();
+      await openSettings();
+      // The version running cannot be installed over itself.
+      expect(screen.queryByRole('button', { name: /0\.2\.0/ })).toBeNull();
+
+      await fireEvent.click(screen.getByRole('button', { name: 'Install 0.3.0' }));
+      await settle();
+      expect(feed.installs).toEqual([]);
+      await fireEvent.click(screen.getByRole('button', { name: 'Install and restart' }));
+      await settle();
+      expect(feed.installs).toEqual(['0.3.0']);
+
+      await fireEvent.click(screen.getByRole('button', { name: 'Go back to 0.1.0' }));
+      await settle();
+      expect(screen.getByText(/an older version cannot load them/)).toBeTruthy();
+      await fireEvent.click(screen.getByRole('button', { name: 'Install and restart' }));
+      await settle();
+      expect(feed.installs).toEqual(['0.3.0', '0.1.0']);
+    });
+
+    it('asks again before nothing: cancelling installs nothing', async () => {
+      feed.updateSettings = windows;
+      feed.published = three;
+      await start();
+      await openSettings();
+      await fireEvent.click(screen.getByRole('button', { name: 'Install 0.3.0' }));
+      await settle();
+      await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      await settle();
+      expect(screen.queryByRole('button', { name: 'Install and restart' })).toBeNull();
+      expect(feed.installs).toEqual([]);
+    });
+
+    it('says why a version was not installed', async () => {
+      feed.updateSettings = windows;
+      feed.published = three;
+      feed.installRefusal = 'corrupt';
+      await start();
+      await openSettings();
+      await fireEvent.click(screen.getByRole('button', { name: 'Install 0.3.0' }));
+      await settle();
+      await fireEvent.click(screen.getByRole('button', { name: 'Install and restart' }));
+      await settle();
+      expect(screen.getByRole('alert').textContent).toContain('Nothing was installed');
+    });
+
+    it('installs nothing while something is not saved', async () => {
+      feed.updateSettings = windows;
+      feed.published = three;
+      await start();
+      feed.push(snapshot({ profiles: profiles({ unsaved: true }) }));
+      await openSettings();
+      await fireEvent.click(screen.getByRole('button', { name: 'Install 0.3.0' }));
+      await settle();
+      const confirm = screen.getByRole('button', { name: 'Install and restart' });
+      expect((confirm as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByText(/Save your changes first/)).toBeTruthy();
+    });
+
+    it('offers no installer for a version that has none', async () => {
+      feed.updateSettings = windows;
+      feed.published = [published('0.3.0', { newer: true, installable: false }), three[1]];
+      await start();
+      await openSettings();
+      expect(screen.queryByRole('button', { name: 'Install 0.3.0' })).toBeNull();
+      await fireEvent.click(screen.getAllByRole('button', { name: 'What changed' })[0]);
+      expect(feed.opened).toEqual(['0.3.0']);
+    });
+
+    it('sends to the download page where the package manager installs', async () => {
+      feed.updateSettings = { ...windows, installs: false };
+      feed.published = three.map((version) => ({ ...version, installable: false }));
+      await start();
+      expect(banner()).not.toBeNull();
+      await openSettings();
+      expect(screen.queryByRole('button', { name: /^Install/ })).toBeNull();
+      await fireEvent.click(screen.getAllByRole('button', { name: 'Download page' })[2]);
+      expect(feed.opened).toEqual(['0.1.0']);
+      expect(screen.getByText(/package manager/)).toBeTruthy();
+    });
+
+    it('opens the profile backups', async () => {
+      feed.updateSettings = windows;
+      await start();
+      await openSettings();
+      await fireEvent.click(screen.getByRole('button', { name: 'Open the profile backups' }));
+      expect(feed.opened).toEqual(['backups']);
     });
   });
 
