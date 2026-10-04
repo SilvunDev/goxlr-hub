@@ -17,6 +17,10 @@ const FIRST_NAME: &str = "Default";
 
 const MAX_NAME_LENGTH: usize = 60;
 
+/// The format of the files written here. Raised when a file changes in a way
+/// an older version of the app would misread.
+pub const FORMAT: u32 = 1;
+
 /// Names Windows keeps for itself, whatever follows the first dot.
 const RESERVED_NAMES: [&str; 22] = [
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
@@ -60,6 +64,8 @@ pub enum ProfileError {
     NotFound,
     /// The file is there but makes no sense.
     Unreadable,
+    /// A newer version of the app wrote the file. It is left alone.
+    Newer,
     /// The disk refused.
     Storage,
 }
@@ -204,6 +210,32 @@ struct MixFile {
     routing: BTreeMap<RoutingInput, Vec<RoutingOutput>>,
 }
 
+/// What every file starts with.
+#[derive(Deserialize)]
+struct Header {
+    /// Files from before the formats were numbered are of the first one.
+    #[serde(default = "first_format")]
+    format: u32,
+}
+
+fn first_format() -> u32 {
+    1
+}
+
+/// A file as it is written: its format, then what it keeps.
+#[derive(Serialize)]
+struct Numbered<'a, T> {
+    format: u32,
+    #[serde(flatten)]
+    body: &'a T,
+}
+
+/// Whether a newer version of the app wrote a file. A file that makes no
+/// sense, or is not there, is not newer.
+fn is_newer(text: &str) -> bool {
+    toml::from_str::<Header>(text).is_ok_and(|header| header.format > FORMAT)
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StateFile {
     /// The profile to apply on launch.
@@ -318,10 +350,34 @@ impl Library {
     fn read<T: DeserializeOwned>(&self, kind: Kind, name: &str) -> Result<T, ProfileError> {
         self.known(kind, name)?;
         let text = fs::read_to_string(self.path(kind, name)).map_err(|_| ProfileError::Storage)?;
+        if is_newer(&text) {
+            return Err(ProfileError::Newer);
+        }
         toml::from_str(&text).map_err(|_| ProfileError::Unreadable)
     }
 
+    /// Whether a newer version of the app wrote what is saved under a name.
+    fn newer(&self, kind: Kind, name: &str) -> bool {
+        fs::read_to_string(self.path(kind, name)).is_ok_and(|text| is_newer(&text))
+    }
+
+    /// A profile this version cannot read may be made of any piece: until
+    /// the app is updated, no piece is renamed or deleted under it.
+    fn spare_newer_profiles(&self, kind: Kind) -> Result<(), ProfileError> {
+        let at_risk = kind != Kind::Profile
+            && self
+                .names(Kind::Profile)
+                .iter()
+                .any(|profile| self.newer(Kind::Profile, profile));
+        if at_risk {
+            Err(ProfileError::Newer)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Writes beside the file, then swaps: a crash never leaves half a file.
+    /// A file a newer version of the app wrote is never written over.
     fn write<T: Serialize>(
         &mut self,
         kind: Kind,
@@ -329,7 +385,14 @@ impl Library {
         file: &T,
     ) -> Result<(), ProfileError> {
         let name = valid_name(name)?;
-        let text = toml::to_string(file).map_err(|_| ProfileError::Storage)?;
+        if self.newer(kind, &name) {
+            return Err(ProfileError::Newer);
+        }
+        let numbered = Numbered {
+            format: FORMAT,
+            body: file,
+        };
+        let text = toml::to_string(&numbered).map_err(|_| ProfileError::Storage)?;
         let path = self.path(kind, &name);
         let beside = path.with_extension("toml.new");
         let written = fs::create_dir_all(self.root.join(kind.folder()))
@@ -384,6 +447,7 @@ impl Library {
         if self.has(kind, &to) && !same_name(name, &to) {
             return Err(ProfileError::NameTaken);
         }
+        self.spare_newer_profiles(kind)?;
         let users = self.users(kind, name);
         fs::rename(self.path(kind, name), self.path(kind, &to))
             .map_err(|_| ProfileError::Storage)?;
@@ -414,6 +478,7 @@ impl Library {
     /// stays.
     pub fn delete(&mut self, kind: Kind, name: &str) -> Result<(), ProfileError> {
         self.known(kind, name)?;
+        self.spare_newer_profiles(kind)?;
         if !self.users(kind, name).is_empty() {
             return Err(ProfileError::InUse);
         }
@@ -983,5 +1048,79 @@ gain = 0
         assert_eq!(library.write_empty_pieces(), Err(ProfileError::Storage));
         assert_eq!(library.last(), None);
         fs::remove_file(&folder.0).unwrap();
+    }
+
+    #[test]
+    fn every_file_says_its_format_and_one_that_does_not_is_of_the_first() {
+        let (mut library, folder) = library();
+        library.write_mix("Stream", &a_mix()).unwrap();
+        library.write_mic("Stream", &a_mic()).unwrap();
+        library
+            .write_profile("Stream", &assembly("Stream", "Stream"))
+            .unwrap();
+        for file in [
+            "mixes/Stream.toml",
+            "mics/Stream.toml",
+            "profiles/Stream.toml",
+        ] {
+            assert!(
+                folder.text(file).starts_with(
+                    "format = 1
+"
+                ),
+                "{file}"
+            );
+        }
+
+        let unnumbered = folder.text("mixes/Stream.toml").replacen(
+            "format = 1
+",
+            "",
+            1,
+        );
+        folder.put("mixes/Old.toml", &unnumbered);
+        let library = Library::open(folder.0.clone());
+        assert_eq!(library.read_mix("Old"), Ok(a_mix()));
+    }
+
+    #[test]
+    fn a_file_of_a_newer_format_is_neither_read_nor_written_over() {
+        let (mut library, folder) = library();
+        library.write_mix("Stream", &a_mix()).unwrap();
+        library.write_mic("Stream", &a_mic()).unwrap();
+        let newer = "format = 2
+shape = \"unheard of\"
+";
+        for file in ["mixes/Later.toml", "mics/Later.toml", "profiles/Later.toml"] {
+            folder.put(file, newer);
+        }
+        let mut library = Library::open(folder.0.clone());
+
+        assert_eq!(library.read_mix("Later"), Err(ProfileError::Newer));
+        assert_eq!(library.read_mic("Later"), Err(ProfileError::Newer));
+        assert_eq!(library.read_profile("Later"), Err(ProfileError::Newer));
+        assert_eq!(
+            library.write_mix("Later", &a_mix()),
+            Err(ProfileError::Newer)
+        );
+        assert_eq!(
+            library.write_profile("Later", &assembly("Stream", "Stream")),
+            Err(ProfileError::Newer)
+        );
+        assert_eq!(folder.text("mixes/Later.toml"), newer);
+        assert_eq!(folder.text("profiles/Later.toml"), newer);
+
+        // The newer profile may be made of any piece: they all stay.
+        assert_eq!(
+            library.delete(Kind::Mix, "Stream"),
+            Err(ProfileError::Newer)
+        );
+        assert_eq!(
+            library.rename(Kind::Mic, "Stream", "Other"),
+            Err(ProfileError::Newer)
+        );
+        // It can still be put aside or removed by who knows what it is.
+        assert_eq!(library.delete(Kind::Profile, "Later"), Ok(()));
+        assert_eq!(library.delete(Kind::Mix, "Stream"), Ok(()));
     }
 }

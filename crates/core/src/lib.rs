@@ -2,6 +2,7 @@
 //! draws. The interface never reaches the device: it sends an [`Intent`] and
 //! receives a [`Snapshot`].
 
+pub mod backup;
 mod library;
 mod mic;
 mod station;
@@ -14,7 +15,7 @@ use goxlr_hub_protocol::{
 };
 use serde::{Deserialize, Serialize};
 
-pub use library::{Assembly, Kind, Library, MixPiece, ProfileError, valid_name};
+pub use library::{Assembly, FORMAT, Kind, Library, MixPiece, ProfileError, valid_name};
 pub use mic::{
     Compressor, CompressorSetting, EqBandView, EqPoint, Gate, GateSetting, MAX_GAIN_DB, MicBlock,
     MicState, MicView,

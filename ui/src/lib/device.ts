@@ -192,6 +192,7 @@ export const PROFILE_ERRORS = [
   'inUse',
   'notFound',
   'unreadable',
+  'newer',
   'storage',
 ] as const;
 

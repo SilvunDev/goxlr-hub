@@ -34,6 +34,11 @@ one can be changed without the other; controls and lighting will join them.
 Mutes are not part of a profile. Profiles are plain TOML files in the
 configuration folder of the app.
 
+Each file says which format it is written in. A file made by a newer version
+of the app is neither loaded nor overwritten by an older one. The first time
+another version of the app starts, it copies the profiles to the `backups`
+folder next to them before touching anything; the ten latest copies are kept.
+
 On launch the app brings the GoXLR to the last profile. The first time, it
 makes a profile that leaves the volumes as they are, and the microphone type
 and gain too until you choose them; every channel starts live, on the default
