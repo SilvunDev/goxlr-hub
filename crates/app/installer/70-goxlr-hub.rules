@@ -1,0 +1,3 @@
+# Lets whoever sits at the computer use the full-size GoXLR without being
+# root. Installed by the .deb and .rpm packages of GoXLR Hub.
+SUBSYSTEM=="usb", ATTR{idVendor}=="1220", ATTR{idProduct}=="8fe0", TAG+="uaccess"

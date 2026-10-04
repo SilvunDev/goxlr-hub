@@ -67,6 +67,15 @@ Versions follow [Semantic Versioning](https://semver.org/). Releases and
 `CHANGELOG.md` are generated from commit history; do not edit the changelog by
 hand.
 
+A release pull request is kept up to date on every push to `main`. It writes
+the changelog and the version of the app (`Cargo.toml`, `Cargo.lock`,
+`package.json`); do not change the version by hand either. Merging it tags
+the release, then the release workflow builds the installers on
+GitHub-hosted runners, attests them and attaches them to the release.
+Installers are never built on a personal computer. Every pull request builds
+them too, without publishing, so that a broken installer shows before a
+release.
+
 ## Reporting security issues
 
 Do not open a public issue. See [SECURITY.md](SECURITY.md).
