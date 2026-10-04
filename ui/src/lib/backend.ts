@@ -79,6 +79,114 @@ export async function setStartup(startup: Startup): Promise<Startup | null> {
   }
 }
 
+/** What the interface needs to know about updates before asking GitHub. */
+export interface UpdateSettings {
+  /** The version running. */
+  version: string;
+  /** The app asks GitHub by itself whether a new version is out. */
+  automatic: boolean;
+  /** The app can install a version by itself. Elsewhere it opens its page. */
+  installs: boolean;
+}
+
+/** A published version of the app. */
+export interface PublishedVersion {
+  version: string;
+  /** When it was published, as GitHub writes dates. */
+  published: string;
+  /** It is the one running. */
+  current: boolean;
+  /** It came out after the one running. */
+  newer: boolean;
+  /** The app can install it by itself. */
+  installable: boolean;
+}
+
+export const UPDATE_ERRORS = [
+  'offline',
+  'unexpected',
+  'notFound',
+  'corrupt',
+  'unsaved',
+  'storage',
+  'unsupported',
+] as const;
+
+/** Why the versions could not be listed, or one could not be installed. */
+export type UpdateError = (typeof UPDATE_ERRORS)[number];
+
+function updateError(error: unknown): UpdateError {
+  const known = UPDATE_ERRORS.find((code) => code === error);
+  if (!known) console.error('Could not reach the updates', error);
+  return known ?? 'unexpected';
+}
+
+/** Nothing when the Rust side cannot tell. */
+export async function getUpdateSettings(): Promise<UpdateSettings | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<UpdateSettings>('update_settings');
+  } catch (error) {
+    console.error('Could not read the update settings', error);
+    return null;
+  }
+}
+
+/** Returns the settings as they are now, or nothing when the change failed. */
+export async function setAutomaticUpdates(automatic: boolean): Promise<UpdateSettings | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<UpdateSettings>('set_automatic_updates', { automatic });
+  } catch (error) {
+    console.error('Could not change the update settings', error);
+    return null;
+  }
+}
+
+/** The published versions, latest first, or why they could not be listed. */
+export async function getPublishedVersions(): Promise<PublishedVersion[] | UpdateError> {
+  if (!isTauri()) return 'offline';
+  try {
+    return await invoke<PublishedVersion[]>('published_versions');
+  } catch (error) {
+    return updateError(error);
+  }
+}
+
+/**
+ * Downloads and starts the installer of a published version. The app quits
+ * when it worked; otherwise returns why it did not.
+ */
+export async function installVersion(version: string): Promise<UpdateError | null> {
+  if (!isTauri()) return 'unsupported';
+  try {
+    await invoke('install_version', { version });
+    return null;
+  } catch (error) {
+    return updateError(error);
+  }
+}
+
+/** Opens the page of a published version in the browser. */
+export async function openRelease(version: string): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    await invoke('open_release', { version });
+  } catch (error) {
+    console.error('Could not open the page of the version', error);
+  }
+}
+
+/** Opens the folder the profiles are backed up in. */
+export async function openBackups(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    await invoke('open_backups');
+  } catch (error) {
+    console.error('Could not open the backups', error);
+  }
+}
+
 /** Quits the app for good. */
 export async function quit(): Promise<void> {
   if (!isTauri()) return;

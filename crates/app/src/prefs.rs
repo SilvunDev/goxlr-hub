@@ -15,11 +15,16 @@ pub const AUTOSTART_FLAG: &str = "--autostart";
 pub struct Prefs {
     /// Started with the computer, the app stays in the system tray.
     pub start_hidden: bool,
+    /// The app asks GitHub by itself whether a new version is out.
+    pub check_updates: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { start_hidden: true }
+        Self {
+            start_hidden: true,
+            check_updates: true,
+        }
     }
 }
 
@@ -64,9 +69,10 @@ mod tests {
 
     #[test]
     fn only_a_launch_by_the_computer_keeps_the_window_closed() {
-        let hidden = Prefs { start_hidden: true };
+        let hidden = Prefs::default();
         let shown = Prefs {
             start_hidden: false,
+            ..hidden
         };
         let by_the_computer = arguments(&["goxlr-hub.exe", AUTOSTART_FLAG]);
         let by_hand = arguments(&["goxlr-hub.exe"]);
@@ -83,14 +89,34 @@ mod tests {
     fn preferences_are_kept_and_a_broken_file_gives_the_defaults() {
         let folder = std::env::temp_dir().join(format!("goxlr-hub-prefs-{}", std::process::id()));
         let path = folder.join("deep").join("settings.toml");
-        assert_eq!(Prefs::load(&path), Prefs { start_hidden: true });
+        assert_eq!(
+            Prefs::load(&path),
+            Prefs {
+                start_hidden: true,
+                check_updates: true
+            }
+        );
 
         let shown = Prefs {
             start_hidden: false,
+            check_updates: false,
         };
         shown.save(&path).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "startHidden = false\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "startHidden = false\ncheckUpdates = false\n"
+        );
         assert_eq!(Prefs::load(&path), shown);
+
+        // A file from before a setting existed keeps what it says.
+        fs::write(&path, "startHidden = false\n").unwrap();
+        assert_eq!(
+            Prefs::load(&path),
+            Prefs {
+                start_hidden: false,
+                check_updates: true
+            }
+        );
 
         for broken in ["startHidden = \"maybe\"", "= = =", ""] {
             fs::write(&path, broken).unwrap();
