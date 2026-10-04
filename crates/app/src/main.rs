@@ -8,9 +8,9 @@ mod tray;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use goxlr_hub_core::{Intent, ProfileCommand, ProfileError};
+use goxlr_hub_core::{Intent, ProfileCommand, ProfileError, backup};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
@@ -146,9 +146,19 @@ fn main() {
             let prefs = Prefs::load(&prefs_file);
             app.manage(PrefsFile(prefs_file));
 
+            // Before anything reads the profiles: another version of the
+            // app may be about to rewrite them.
+            let profiles = folder.join("profiles");
+            let version = app.package_info().version.to_string();
+            match backup::on_version_change(&folder, &profiles, &version, SystemTime::now()) {
+                Ok(Some(copy)) => eprintln!("profiles backed up to {}", copy.display()),
+                Ok(None) => {}
+                Err(error) => eprintln!("could not back the profiles up: {error}"),
+            }
+
             let unsaved = Unsaved::default();
             app.manage(unsaved.clone());
-            let asks = device_feed::start(app.handle(), folder.join("profiles"), unsaved);
+            let asks = device_feed::start(app.handle(), profiles, unsaved);
             if let Err(error) = &asks {
                 eprintln!("no device to show: {error}");
             }
