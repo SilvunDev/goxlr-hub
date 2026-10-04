@@ -54,6 +54,7 @@ export const en = {
       inUse: 'It is in use. Switch to another one first, or take it out of the profiles made of it.',
       notFound: 'It is no longer there.',
       unreadable: 'Its file cannot be read.',
+      newer: 'A newer version of GoXLR Hub made it. Update the app to use it; it is left as it is.',
       storage: 'Could not write to the disk.',
     },
   },

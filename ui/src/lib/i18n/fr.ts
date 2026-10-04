@@ -55,6 +55,7 @@ export const fr: Messages = {
       inUse: 'Il est utilisé. Passez d’abord à un autre, ou retirez-le des profils qui s’en servent.',
       notFound: 'Il n’est plus là.',
       unreadable: 'Son fichier est illisible.',
+      newer: 'Une version plus récente de GoXLR Hub l’a créé. Mettez l’appli à jour pour l’utiliser ; il est laissé tel quel.',
       storage: 'Impossible d’écrire sur le disque.',
     },
   },
