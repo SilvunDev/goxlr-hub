@@ -68,7 +68,14 @@ fn fetch(installer: &Installer, path: &Path) -> Result<(), UpdateError> {
         .reader();
     let mut file = File::create(path).map_err(|_| UpdateError::Storage)?;
     io::copy(&mut body, &mut file).map_err(|error| {
-        if error.kind() == io::ErrorKind::StorageFull {
+        let too_long = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+            .is_some_and(|inner| matches!(inner, ureq::Error::BodyExceedsLimit(_)));
+        if too_long {
+            // More than what was published is not what was published.
+            UpdateError::Corrupt
+        } else if error.kind() == io::ErrorKind::StorageFull {
             UpdateError::Storage
         } else {
             UpdateError::Offline
@@ -108,7 +115,7 @@ mod tests {
         assert!(!file.exists());
         // A file longer than announced is cut and refused.
         published.size = 100;
-        assert!(download(&published, &folder).is_err());
+        assert_eq!(download(&published, &folder), Err(UpdateError::Corrupt));
         assert!(!file.exists());
         fs::remove_dir_all(folder).unwrap();
     }
