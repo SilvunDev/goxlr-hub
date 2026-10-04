@@ -51,8 +51,7 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 |
-            jq -r '.packages[] | select(.name == "goxlr-hub") | .version')
+          version=$(jq -r .version crates/app/tauri.conf.json)
           if [ -n "$TAG" ] && [ "v$version" != "$TAG" ]; then
             echo "::error::the app is version $version, the release is $TAG"
             exit 1
