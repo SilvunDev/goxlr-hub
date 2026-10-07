@@ -2,7 +2,8 @@
   import { PAD_BANKS, PAD_CLEAR, PADS, type PadId } from '../device';
   import { i18n } from '../i18n/index.svelte';
 
-  let { pressed }: { pressed: readonly string[] } = $props();
+  let { pressed, lit = pressed }: { pressed: readonly string[]; lit?: readonly string[] } =
+    $props();
 
   /** What a screen reader says of a pad: its name, then whether it is held. */
   function said(pad: PadId, down: boolean): string {
@@ -14,7 +15,8 @@
 <!-- Shows what the device says, nothing to click: a list, not buttons. -->
 {#snippet cell(pad: PadId, shape: string)}
   {@const down = pressed.includes(pad)}
-  <li class={shape} class:down aria-label={said(pad, down)}>
+  <!-- Lit while held and for a moment after, so that a quick press is seen. -->
+  <li class={shape} class:down={lit.includes(pad)} aria-label={said(pad, down)}>
     <span aria-hidden="true">{i18n.t.pads.names[pad]}</span>
   </li>
 {/snippet}

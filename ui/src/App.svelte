@@ -3,6 +3,7 @@
   import { onDeviceState, onQuitRequested, quit, runProfileCommand } from './lib/backend';
   import Channels from './lib/components/Channels.svelte';
   import ComingSoon from './lib/components/ComingSoon.svelte';
+  import Controls from './lib/components/Controls.svelte';
   import Header from './lib/components/Header.svelte';
   import Mic from './lib/components/Mic.svelte';
   import Mixer from './lib/components/Mixer.svelte';
@@ -90,6 +91,8 @@
         <Channels {device} />
       {:else if current === 'routing'}
         <Routing {device} />
+      {:else if current === 'controls'}
+        <Controls {device} />
       {:else}
         <ComingSoon title={i18n.t.nav[current]} />
       {/if}
