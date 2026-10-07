@@ -16,6 +16,12 @@ font.
 | [`logo-dark.svg`](logo-dark.svg) | Mark and wordmark, for dark backgrounds. |
 | [`logo-light.svg`](logo-light.svg) | Mark and wordmark, for light backgrounds. |
 | [`social-preview.png`](social-preview.png) | Repository social preview, 1280 × 640, a still from the teaser video. |
+| [`installer-sidebar.svg`](installer-sidebar.svg) | Windows installer, welcome and finish pages, 164 × 314. |
+| [`installer-header.svg`](installer-header.svg) | Windows installer and uninstaller, top of the other pages, 150 × 57. |
+
+The two installer pictures are drawn from the logo by
+[`scripts/installer-images.mjs`](../../scripts/installer-images.mjs), which
+also writes the BMP files the installer embeds, in `crates/app/installer/`.
 
 Rules:
 

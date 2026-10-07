@@ -36,6 +36,7 @@
     ],
     "license": "GPL-3.0-or-later",
     "publisher": "GoXLR Hub contributors",
+    "copyright": "GoXLR Hub contributors · Unofficial, not affiliated with TC-Helicon",
     "homepage": "https://github.com/SilvunDev/goxlr-hub",
     "category": "Utility",
     "shortDescription": "Control app for the TC-Helicon GoXLR (unofficial)",
@@ -51,6 +52,11 @@
       "nsis": {
         "installMode": "currentUser",
         "installerHooks": "installer/hooks.nsh",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "sidebarImage": "installer/sidebar.bmp",
+        "headerImage": "installer/header.bmp",
+        "uninstallerHeaderImage": "installer/header.bmp",
         "languages": [
           "English",
           "French"
