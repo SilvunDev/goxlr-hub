@@ -147,13 +147,13 @@
     display: flex;
     flex-wrap: wrap;
     align-items: flex-start;
-    gap: 40px;
+    gap: 32px;
     margin-top: 14px;
   }
 
   .blocks {
     display: flex;
-    flex: 1 1 420px;
+    flex: 1 1 340px;
     flex-direction: column;
     gap: 22px;
     min-width: 0;
@@ -167,7 +167,7 @@
 
   ul {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
     gap: 8px;
     margin: 0;
     padding: 0;
@@ -176,7 +176,7 @@
 
   aside {
     display: flex;
-    flex: 0 0 340px;
+    flex: 0 0 330px;
     flex-direction: column;
     gap: 22px;
     max-width: 100%;
