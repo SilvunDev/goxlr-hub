@@ -1,7 +1,7 @@
 {
   "name": "goxlr-hub",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Open source control app for the TC-Helicon GoXLR (unofficial)",
   "license": "GPL-3.0-or-later",
   "type": "module",
