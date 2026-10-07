@@ -859,6 +859,9 @@ impl Hub {
 }
 
 #[cfg(test)]
+mod controls_tests;
+
+#[cfg(test)]
 mod tests {
     use goxlr_hub_device::open_virtual;
     use goxlr_hub_protocol::Side;

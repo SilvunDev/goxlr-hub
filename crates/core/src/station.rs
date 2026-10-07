@@ -264,13 +264,13 @@ mod tests {
 
     use goxlr_hub_device::{DeviceKind, Link, Session, VirtualGoXlr, VirtualHandle};
     use goxlr_hub_protocol::{
-        Button, ButtonLight, ButtonLights, Channel, EffectKey, EqBand, Fader, MicParamKey, MicType,
-        OutputSet, Packet, Request, RoutingInput, RoutingOutput, Side,
+        Button, ButtonLight, Channel, EffectKey, EqBand, Fader, MicParamKey, MicType, OutputSet,
+        Packet, Request, RoutingInput, RoutingOutput, Side,
     };
     use serde_json::json;
 
     use super::*;
-    use crate::{CompressorSetting, GateSetting};
+    use crate::{Action, AudioTarget, CompressorSetting, GateSetting, Gesture, MuteMode};
 
     /// What the test can do to a fake real device, and see of it.
     #[derive(Clone)]
@@ -967,5 +967,124 @@ mod tests {
             Connection::Unreachable { .. }
         ));
         assert_eq!(station.poll().unwrap().device.kind, "virtual");
+    }
+
+    fn hold_to_mute(button: Button, target: AudioTarget) -> Intent {
+        Intent::SetGesture {
+            button,
+            gesture: Gesture::Hold,
+            action: Some(Action::Mute {
+                target,
+                mode: MuteMode::Mute,
+            }),
+        }
+    }
+
+    fn press(button: Button, down: bool) -> Intent {
+        Intent::PressButton { button, down }
+    }
+
+    #[test]
+    fn a_button_pressed_from_the_screen_is_pressed_on_the_virtual_device() {
+        let (mut station, _) = station([]);
+        station.poll().unwrap();
+
+        station.apply(press(Button::MicMute, true)).unwrap();
+        let snapshot = station.poll().unwrap();
+        assert_eq!(snapshot.pressed, [Button::MicMute]);
+        assert!(snapshot.mic_off);
+        station.apply(press(Button::MicMute, false)).unwrap();
+        assert!(station.poll().unwrap().pressed.is_empty());
+
+        // A click shorter than a reading is a press all the same.
+        station.apply(press(Button::MicMute, true)).unwrap();
+        station.apply(press(Button::MicMute, false)).unwrap();
+        let snapshot = station.poll().unwrap();
+        assert!(!snapshot.mic_off, "toggled back");
+        assert_eq!(snapshot.last_press.unwrap().button, Button::MicMute);
+        // What the press did is what the next real device is brought to.
+        assert!(!station.settings().mixer.mic_off);
+    }
+
+    #[test]
+    fn the_real_device_is_never_pressed_from_the_screen() {
+        let (device, bench) = real_device();
+        let (mut station, _) = station([Ok(device)]);
+        station.scan();
+        station.poll().unwrap();
+        let before = bench.received.lock().unwrap().len();
+
+        station.apply(press(Button::MicMute, true)).unwrap();
+        let snapshot = station.poll().unwrap();
+        assert!(snapshot.pressed.is_empty() && !snapshot.mic_off);
+        assert_eq!(bench.hands.state().pressed.bits(), 0);
+        // Only readings went to the device.
+        let received = bench.received.lock().unwrap();
+        assert!(
+            received[before..]
+                .iter()
+                .all(|request| matches!(request, Request::GetStatus | Request::GetMicLevel)),
+            "{:?}",
+            &received[before..]
+        );
+    }
+
+    #[test]
+    fn a_cable_pulled_during_a_hold_leaves_nothing_silenced() {
+        let (first, before) = real_device();
+        let (second, after) = real_device();
+        let (mut station, _) = station([Ok(first), Ok(second)]);
+        station.scan();
+        station.poll().unwrap();
+        station
+            .apply(hold_to_mute(Button::MicMute, AudioTarget::Mic))
+            .unwrap();
+        before.hands.press(Button::MicMute);
+        assert!(station.poll().unwrap().mic_off);
+
+        before.unplugged.store(true, Ordering::Relaxed);
+        let snapshot = station.poll().unwrap();
+        assert_eq!(snapshot.device.kind, "virtual");
+        assert!(!snapshot.mic_off, "the finger that held it is gone");
+        assert!(!station.settings().mixer.mic_off);
+
+        // The device that comes back is not told to keep the microphone off,
+        // and is not pressed.
+        station.scan();
+        assert_eq!(station.connection(), &Connection::Hardware);
+        assert!(!after.hands.state().mic_input_muted);
+        assert!(!station.poll().unwrap().mic_off);
+    }
+
+    #[test]
+    fn a_button_held_on_the_virtual_device_leaves_nothing_silenced_when_a_real_one_comes() {
+        let (device, bench) = real_device();
+        let (mut station, _) = station([Err(OpenError::Absent), Ok(device)]);
+        station.scan();
+        station.poll().unwrap();
+        station
+            .apply(hold_to_mute(
+                Button::SamplerTopLeft,
+                AudioTarget::Channel {
+                    channel: Channel::Music,
+                },
+            ))
+            .unwrap();
+        station.apply(press(Button::SamplerTopLeft, true)).unwrap();
+        let snapshot = station.poll().unwrap();
+        assert!(snapshot.channels[usize::from(Channel::Music.index())].muted);
+
+        station.scan();
+        assert_eq!(station.connection(), &Connection::Hardware);
+        assert!(!bench.hands.state().muted[usize::from(Channel::Music.index())]);
+        assert!(!station.settings().mixer.muted[usize::from(Channel::Music.index())]);
+        // The gesture came with it.
+        assert!(
+            station
+                .settings()
+                .controls
+                .action(Button::SamplerTopLeft, Gesture::Hold)
+                .is_some()
+        );
     }
 }

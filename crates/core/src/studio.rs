@@ -441,13 +441,13 @@ mod tests {
 
     use goxlr_hub_device::{Device, OpenError, VirtualHandle, open_virtual};
     use goxlr_hub_protocol::{
-        Channel, EffectKey, Fader, MicType, OutputSet, RoutingInput, RoutingOutput, Side,
+        Button, Channel, EffectKey, Fader, MicType, OutputSet, RoutingInput, RoutingOutput, Side,
     };
     use serde_json::json;
 
     use super::*;
-    use crate::CompressorSetting;
     use crate::library::tests::Folder;
+    use crate::{Action, AudioTarget, CompressorSetting, Gesture, MuteMode};
 
     /// A port with at most one device to open, and none by default.
     #[derive(Default)]
@@ -1010,5 +1010,275 @@ mod tests {
             serde_json::to_value(ProfileError::NameTaken).unwrap(),
             json!("nameTaken")
         );
+        assert_eq!(
+            read(json!({ "type": "select", "kind": "controls", "name": "A" })),
+            ProfileCommand::Select {
+                kind: Kind::Controls,
+                name: "A".into()
+            }
+        );
+    }
+
+    const PAD: Button = Button::SamplerTopLeft;
+
+    fn mute_music(mode: MuteMode) -> Action {
+        Action::Mute {
+            target: AudioTarget::Channel {
+                channel: Channel::Music,
+            },
+            mode,
+        }
+    }
+
+    fn give(button: Button, gesture: Gesture, action: Action) -> Intent {
+        Intent::SetGesture {
+            button,
+            gesture,
+            action: Some(action),
+        }
+    }
+
+    /// What a button does for a gesture, as the interface is told.
+    fn does(studio: &mut Studio<Socket>, button: Button, gesture: Gesture) -> Option<Action> {
+        let view = studio.poll().unwrap().controls;
+        let view = view
+            .buttons
+            .into_iter()
+            .find(|view| view.button == button)
+            .unwrap();
+        match gesture {
+            Gesture::Short => view.short,
+            Gesture::Long => view.long,
+            Gesture::Double => view.double,
+            Gesture::Hold => view.hold,
+        }
+    }
+
+    #[test]
+    fn what_the_buttons_do_is_saved_and_comes_back_with_the_profile() {
+        let folder = Folder::new();
+        let mut studio = launch(&folder);
+        assert!(!studio.unsaved());
+
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Toggle)))
+            .unwrap();
+        let view = studio.poll().unwrap().profiles;
+        assert_eq!(
+            (view.dirty.controls, view.dirty.mix, view.dirty.mic),
+            (true, false, false)
+        );
+        assert!(view.unsaved && studio.unsaved());
+
+        // Put back by hand: nothing to save any more.
+        studio
+            .apply(Intent::ResetControls { button: Some(PAD) })
+            .unwrap();
+        assert!(!studio.unsaved());
+
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Toggle)))
+            .unwrap();
+        studio
+            .apply(Intent::SetPressTimes {
+                long_press_ms: 700,
+                double_press_ms: 333,
+            })
+            .unwrap();
+        studio.run(SAVE).unwrap();
+        assert!(!studio.unsaved());
+        let text = folder.text("controls/Default.toml");
+        assert!(text.contains("longPressMs = 700"), "{text}");
+        assert!(text.contains("samplerTopLeft"), "{text}");
+
+        let mut studio = launch(&folder);
+        assert!(!studio.unsaved());
+        assert_eq!(
+            does(&mut studio, PAD, Gesture::Long),
+            Some(mute_music(MuteMode::Toggle))
+        );
+        assert_eq!(studio.poll().unwrap().controls.long_press_ms, 700);
+    }
+
+    #[test]
+    fn a_profile_made_before_the_controls_were_kept_shows_no_banner() {
+        let folder = Folder::new();
+        launch(&folder);
+        // As the first versions left it.
+        folder.put("controls/Default.toml", "# Nothing to keep yet.\n");
+        let mut studio = launch(&folder);
+        assert!(!studio.unsaved());
+        assert!(
+            does(&mut studio, Button::MicMute, Gesture::Short).is_some(),
+            "the buttons do what one expects"
+        );
+        assert_eq!(does(&mut studio, PAD, Gesture::Long), None);
+
+        // Not even a file: the same.
+        std::fs::remove_dir_all(folder.0.join("controls")).unwrap();
+        let mut studio = launch(&folder);
+        assert!(!studio.unsaved());
+        assert!(does(&mut studio, Button::MicMute, Gesture::Short).is_some());
+        // Saving brings the file back.
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Mute)))
+            .unwrap();
+        studio.run(SAVE).unwrap();
+        assert!(
+            folder
+                .text("controls/Default.toml")
+                .contains("samplerTopLeft")
+        );
+    }
+
+    #[test]
+    fn controls_that_cannot_be_read_do_not_stop_the_launch() {
+        let folder = Folder::new();
+        launch(&folder);
+        folder.put("controls/Default.toml", "format = 1\n[buttons.mic");
+        let mut studio = launch(&folder);
+        // The first profile that can be read is another one, made on the spot.
+        let view = studio.poll().unwrap().profiles;
+        assert_eq!(view.active.profile, "Default 2");
+        assert!(!studio.unsaved());
+
+        // A file of a newer format is left as it is.
+        let folder = Folder::new();
+        launch(&folder);
+        let later = "format = 2\nshape = \"later\"\n";
+        folder.put("controls/Default.toml", later);
+        launch(&folder);
+        assert_eq!(folder.text("controls/Default.toml"), later);
+    }
+
+    #[test]
+    fn a_profile_saved_under_a_new_name_gets_controls_of_its_own() {
+        let folder = Folder::new();
+        let mut studio = launch(&folder);
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Mute)))
+            .unwrap();
+        studio.run(save_as(Kind::Profile, "Stream")).unwrap();
+        let view = studio.poll().unwrap().profiles;
+        assert_eq!(view.active.controls, "Stream");
+        assert_eq!(view.controls, ["Default", "Stream"]);
+        assert!(!view.unsaved);
+        assert!(
+            folder
+                .text("controls/Stream.toml")
+                .contains("samplerTopLeft")
+        );
+        // The old one is as it was.
+        assert!(
+            !folder
+                .text("controls/Default.toml")
+                .contains("samplerTopLeft")
+        );
+
+        // Changing profile changes the buttons.
+        studio.run(select(Kind::Profile, "Default")).unwrap();
+        assert_eq!(does(&mut studio, PAD, Gesture::Long), None);
+        studio.run(select(Kind::Profile, "Stream")).unwrap();
+        assert!(does(&mut studio, PAD, Gesture::Long).is_some());
+    }
+
+    #[test]
+    fn the_controls_can_be_changed_alone_like_the_mix_and_the_microphone() {
+        let folder = Folder::new();
+        let mut studio = launch(&folder);
+        studio.apply(headphones(70)).unwrap();
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Mute)))
+            .unwrap();
+        studio.run(save_as(Kind::Controls, "Loud pad")).unwrap();
+        let view = studio.poll().unwrap().profiles;
+        assert_eq!(view.active.controls, "Loud pad");
+        assert!(
+            view.dirty.profile,
+            "the profile is made of other pieces now"
+        );
+        assert!(view.dirty.mix);
+        assert!(!view.dirty.controls);
+
+        studio.run(select(Kind::Controls, "Default")).unwrap();
+        assert_eq!(does(&mut studio, PAD, Gesture::Long), None);
+        // The mix was not touched by it.
+        assert!(studio.poll().unwrap().profiles.dirty.mix);
+        studio.run(select(Kind::Controls, "Loud pad")).unwrap();
+        assert!(does(&mut studio, PAD, Gesture::Long).is_some());
+
+        // Renamed, deleted, or refused, like the others.
+        studio
+            .run(ProfileCommand::Rename {
+                kind: Kind::Controls,
+                name: "Loud pad".into(),
+                to: "Desk".into(),
+            })
+            .unwrap();
+        assert_eq!(studio.poll().unwrap().profiles.active.controls, "Desk");
+        let delete = |name: &str| ProfileCommand::Delete {
+            kind: Kind::Controls,
+            name: name.into(),
+        };
+        assert_eq!(studio.run(delete("Desk")), Err(ProfileError::InUse));
+        // The profile still names it: a piece a profile is made of stays.
+        assert_eq!(studio.run(delete("Default")), Err(ProfileError::InUse));
+    }
+
+    #[test]
+    fn a_profile_copied_gets_copies_of_its_controls() {
+        let folder = Folder::new();
+        let mut studio = launch(&folder);
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Mute)))
+            .unwrap();
+        studio.run(SAVE).unwrap();
+        studio
+            .run(ProfileCommand::Duplicate {
+                kind: Kind::Profile,
+                name: "Default".into(),
+                to: "Copy".into(),
+            })
+            .unwrap();
+        assert!(folder.text("controls/Copy.toml").contains("samplerTopLeft"));
+        studio.run(select(Kind::Profile, "Copy")).unwrap();
+        assert!(does(&mut studio, PAD, Gesture::Long).is_some());
+    }
+
+    #[test]
+    fn a_button_held_while_the_profile_changes_ends_with_what_it_began_with() {
+        let folder = Folder::new();
+        let (mut studio, hands) = launch_plugged(&folder);
+        studio
+            .apply(Intent::SetGesture {
+                button: Button::MicMute,
+                gesture: Gesture::Hold,
+                action: Some(Action::Mute {
+                    target: AudioTarget::Mic,
+                    mode: MuteMode::Mute,
+                }),
+            })
+            .unwrap();
+        studio.run(save_as(Kind::Profile, "Held")).unwrap();
+        // Another profile, where the same button is a plain switch.
+        studio.run(select(Kind::Profile, "Default")).unwrap();
+        studio.run(select(Kind::Profile, "Held")).unwrap();
+        studio.poll().unwrap();
+
+        hands.press(Button::MicMute);
+        assert!(studio.poll().unwrap().mic_off);
+        studio.run(select(Kind::Profile, "Default")).unwrap();
+        assert!(studio.poll().unwrap().mic_off, "still held");
+        hands.release(Button::MicMute);
+        assert!(
+            !studio.poll().unwrap().mic_off,
+            "the hold ended as it began"
+        );
+
+        // The next press belongs to the profile now in use: a switch.
+        hands.press(Button::MicMute);
+        assert!(studio.poll().unwrap().mic_off);
+        hands.release(Button::MicMute);
+        assert!(studio.poll().unwrap().mic_off);
     }
 }
