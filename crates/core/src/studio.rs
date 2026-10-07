@@ -409,12 +409,17 @@ impl<P: Port> Studio<P> {
         let to = self.free(Kind::Profile, to)?;
         let mut assembly = self.library.read_profile(name)?;
         let pieces = self.library.new_assembly(&to);
+        // The controls first: a piece that was never written is made from the
+        // starting buttons, and a refusal leaves no orphan piece behind.
+        let controls = match self.library.read_controls(&assembly.controls) {
+            Err(ProfileError::NotFound) => Controls::default(),
+            controls => controls?,
+        };
+        self.library.write_controls(&pieces.controls, &controls)?;
         self.library
             .duplicate(Kind::Mix, &assembly.mix, &pieces.mix)?;
         self.library
             .duplicate(Kind::Mic, &assembly.mic, &pieces.mic)?;
-        self.library
-            .duplicate(Kind::Controls, &assembly.controls, &pieces.controls)?;
         assembly.mix = pieces.mix;
         assembly.mic = pieces.mic;
         assembly.controls = pieces.controls;
@@ -1243,6 +1248,46 @@ mod tests {
         assert!(folder.text("controls/Copy.toml").contains("samplerTopLeft"));
         studio.run(select(Kind::Profile, "Copy")).unwrap();
         assert!(does(&mut studio, PAD, Gesture::Long).is_some());
+    }
+
+    #[test]
+    fn a_profile_whose_controls_were_never_written_can_still_be_copied() {
+        let folder = Folder::new();
+        launch(&folder);
+        std::fs::remove_dir_all(folder.0.join("controls")).unwrap();
+        let mut studio = launch(&folder);
+        let copy = ProfileCommand::Duplicate {
+            kind: Kind::Profile,
+            name: "Default".into(),
+            to: "Copy".into(),
+        };
+        studio.run(copy).unwrap();
+        // The copy has all its pieces, the controls made of the starting buttons.
+        for piece in ["mixes", "mics", "controls", "profiles"] {
+            assert!(folder.0.join(piece).join("Copy.toml").exists(), "{piece}");
+        }
+        studio.run(select(Kind::Profile, "Copy")).unwrap();
+        assert!(does(&mut studio, Button::MicMute, Gesture::Short).is_some());
+        assert!(!studio.unsaved());
+    }
+
+    #[test]
+    fn a_profile_that_cannot_be_copied_leaves_no_piece_behind() {
+        let folder = Folder::new();
+        launch(&folder);
+        // A second profile, so that the first can be torn.
+        let mut studio = launch(&folder);
+        studio.run(save_as(Kind::Profile, "Other")).unwrap();
+        folder.put("controls/Other.toml", "format = 1\n[buttons.mic");
+        let copy = ProfileCommand::Duplicate {
+            kind: Kind::Profile,
+            name: "Other".into(),
+            to: "Copy".into(),
+        };
+        assert_eq!(studio.run(copy), Err(ProfileError::Unreadable));
+        for piece in ["mixes", "mics", "controls", "profiles"] {
+            assert!(!folder.0.join(piece).join("Copy.toml").exists(), "{piece}");
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! virtual one otherwise, and says which and why.
 
 use goxlr_hub_device::{Device, DeviceError, OpenError, VirtualHandle, open_virtual};
-use goxlr_hub_protocol::Channel;
+use goxlr_hub_protocol::{Button, Channel};
 use serde::Serialize;
 
 use crate::{Hub, Intent, MixerState, Settings, Snapshot};
@@ -129,6 +129,7 @@ impl<P: Port> Station<P> {
             Ok(device) => {
                 // A button held on the virtual device has no finger left.
                 self.demo.release_holds();
+                self.let_go_of_virtual_buttons();
                 self.keep_from_demo(None);
                 match Hub::adopt(device, Some(&self.settings)) {
                     Ok(hub) => {
@@ -156,14 +157,14 @@ impl<P: Port> Station<P> {
 
     /// Does what the interface asked, on the device shown.
     pub fn apply(&mut self, intent: Intent) -> Result<(), DeviceError> {
-        // Only the virtual device is pressed from the screen.
+        // Only the virtual device is pressed from the screen. A button is
+        // always let go, whichever device is shown: a click that began on the
+        // virtual device may end after the real one came.
         if let Intent::PressButton { button, down } = intent {
-            if self.hardware.is_none() {
-                if down {
-                    self.hands.press(button);
-                } else {
-                    self.hands.release(button);
-                }
+            if !down {
+                self.hands.release(button);
+            } else if self.hardware.is_none() {
+                self.hands.press(button);
             }
             return Ok(());
         }
@@ -180,19 +181,35 @@ impl<P: Port> Station<P> {
     }
 
     /// Brings the device shown to other settings, all of them.
-    pub fn load(&mut self, settings: Settings) -> Result<(), DeviceError> {
+    pub fn load(&mut self, mut settings: Settings) -> Result<(), DeviceError> {
         if let Some(hub) = &mut self.hardware {
             if hub.load(settings.clone()).is_ok() {
                 self.settings = settings;
                 return Ok(());
             }
+            // The finger that held a button cannot come up any more: what it
+            // silenced is not loaded.
+            hub.release_holds();
+            let mixer = hub.settings().mixer;
+            settings.mixer.muted = mixer.muted;
+            settings.mixer.mic_off = mixer.mic_off;
             self.hardware = None;
             self.lost = true;
             self.connection = Connection::Demo;
+            self.let_go_of_virtual_buttons();
         }
         self.demo.load(for_show(&settings))?;
         self.settings = settings;
         Ok(())
+    }
+
+    /// The virtual device is out of sight, or about to be: its buttons are
+    /// let go, and what it saw of them is forgotten.
+    fn let_go_of_virtual_buttons(&mut self) {
+        for button in Button::ALL {
+            self.hands.release(button);
+        }
+        self.demo.forget_presses();
     }
 
     /// What was set on the virtual device is kept for the real one, but for
@@ -222,6 +239,8 @@ impl<P: Port> Station<P> {
         }
         // The virtual device always answers.
         let _ = self.demo.load(for_show(&self.settings));
+        // It was not read while the real one was shown.
+        self.demo.forget_presses();
     }
 
     /// The real device stopped answering: back to the virtual one, keeping
@@ -1054,6 +1073,72 @@ mod tests {
         assert_eq!(station.connection(), &Connection::Hardware);
         assert!(!after.hands.state().mic_input_muted);
         assert!(!station.poll().unwrap().mic_off);
+    }
+
+    #[test]
+    fn settings_loaded_on_a_device_that_dropped_do_not_keep_what_a_hold_silenced() {
+        let (device, bench) = real_device();
+        let (mut station, _) = station([Ok(device)]);
+        station.scan();
+        station.poll().unwrap();
+        station
+            .apply(hold_to_mute(Button::MicMute, AudioTarget::Mic))
+            .unwrap();
+        bench.hands.press(Button::MicMute);
+        assert!(station.poll().unwrap().mic_off);
+
+        // What a profile change loads is made of the settings in use.
+        let settings = station.settings().clone();
+        assert!(settings.mixer.mic_off);
+        bench.unplugged.store(true, Ordering::Relaxed);
+        station.load(settings).unwrap();
+        assert_eq!(station.connection(), &Connection::Demo);
+        assert!(!station.settings().mixer.mic_off);
+        assert!(!station.poll().unwrap().mic_off);
+    }
+
+    #[test]
+    fn a_click_that_ends_after_the_real_device_came_lets_go_of_the_virtual_button() {
+        let (device, bench) = real_device();
+        let (mut station, _) = station([Err(OpenError::Absent), Ok(device)]);
+        station.scan();
+        station.poll().unwrap();
+        // A pad that does something for a short press and for a long one.
+        for (gesture, mode) in [
+            (Gesture::Short, MuteMode::Toggle),
+            (Gesture::Long, MuteMode::Mute),
+        ] {
+            station
+                .apply(Intent::SetGesture {
+                    button: Button::SamplerTopLeft,
+                    gesture,
+                    action: Some(Action::Mute {
+                        target: AudioTarget::Channel {
+                            channel: Channel::Music,
+                        },
+                        mode,
+                    }),
+                })
+                .unwrap();
+        }
+        station.apply(press(Button::SamplerTopLeft, true)).unwrap();
+        station.poll().unwrap();
+
+        // The real device comes, and the click ends on a screen that now shows it.
+        station.scan();
+        assert_eq!(station.connection(), &Connection::Hardware);
+        station.apply(press(Button::SamplerTopLeft, false)).unwrap();
+        assert!(station.poll().unwrap().pressed.is_empty());
+
+        // The cable is pulled: the virtual device comes back with nothing held
+        // and no press left over.
+        bench.unplugged.store(true, Ordering::Relaxed);
+        let snapshot = station.poll().unwrap();
+        assert_eq!(snapshot.device.kind, "virtual");
+        assert!(snapshot.pressed.is_empty());
+        let snapshot = station.poll().unwrap();
+        assert!(!snapshot.channels[usize::from(Channel::Music.index())].muted);
+        assert!(!station.settings().mixer.muted[usize::from(Channel::Music.index())]);
     }
 
     #[test]

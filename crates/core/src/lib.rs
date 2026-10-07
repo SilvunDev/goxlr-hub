@@ -333,12 +333,11 @@ enum Silenced {
     Channel(Channel),
 }
 
-/// A hold that began: what to put back when the button comes up. Kept
-/// as it was found, so that a profile loaded meanwhile changes nothing of it.
+/// A hold that began: what it acts on. Kept as it was found, so that a
+/// profile loaded meanwhile changes nothing of it.
 struct Hold {
     button: Button,
-    /// What was silenced before the hold, and whether it was.
-    restore: Vec<(Silenced, bool)>,
+    targets: Vec<Silenced>,
 }
 
 /// The app's side of one connected device.
@@ -353,6 +352,9 @@ pub struct Hub {
     clock: Box<dyn Clock>,
     recognizer: Recognizer,
     holds: Vec<Hold>,
+    /// What each target of a hold was before the first hold on it, and
+    /// whether it was silenced: put back when the last hold on it ends.
+    before_holds: Vec<(Silenced, bool)>,
     /// When each button was last seen down.
     last_down: [Option<Duration>; Button::ALL.len()],
     last_press: Option<LastPress>,
@@ -401,6 +403,7 @@ impl Hub {
             clock: Box::new(SystemClock::default()),
             recognizer: Recognizer::default(),
             holds: Vec::new(),
+            before_holds: Vec::new(),
             last_down: [None; Button::ALL.len()],
             last_press: None,
         };
@@ -467,16 +470,17 @@ impl Hub {
     /// the device: for when it is let go, or gone, and no finger will ever
     /// come up.
     pub fn release_holds(&mut self) {
-        for hold in std::mem::take(&mut self.holds) {
-            for (target, silenced) in hold.restore {
-                match target {
-                    Silenced::Mic => self.mixer.mic_off = silenced,
-                    Silenced::Channel(channel) => {
-                        self.mixer.muted[usize::from(channel.index())] = silenced;
-                    }
-                }
-            }
+        self.holds.clear();
+        for (target, silenced) in std::mem::take(&mut self.before_holds) {
+            self.set_silenced(target, silenced);
         }
+    }
+
+    /// Forgets the presses the device showed before: for when it was out of
+    /// sight, and a button seen down then may be up now.
+    pub fn forget_presses(&mut self) {
+        self.recognizer = Recognizer::default();
+        self.held = None;
     }
 
     /// Does what the interface asked, on the device first.
@@ -638,6 +642,16 @@ impl Hub {
         }
     }
 
+    /// Writes what is silenced in the mixer only, without a word to the device.
+    fn set_silenced(&mut self, target: Silenced, silenced: bool) {
+        match target {
+            Silenced::Mic => self.mixer.mic_off = silenced,
+            Silenced::Channel(channel) => {
+                self.mixer.muted[usize::from(channel.index())] = silenced;
+            }
+        }
+    }
+
     fn silence(&mut self, target: Silenced, silenced: bool) -> Result<(), DeviceError> {
         match target {
             Silenced::Mic => self.set_mic_off(silenced),
@@ -702,26 +716,64 @@ impl Hub {
     }
 
     /// Begins a hold: does what the action says, and notes what to put back.
+    /// Another hold on the same target finds it already held: what it was
+    /// before the first one is what comes back.
     fn begin_hold(&mut self, button: Button, action: Action) -> Result<(), DeviceError> {
-        let mut restore = Vec::new();
+        let mut targets = Vec::new();
         if let Action::Mute { target, .. } = action {
             let target = self.silenced_by(target);
-            restore.push((target, self.is_silenced(target)));
+            if !self.before_holds.iter().any(|(held, _)| *held == target) {
+                self.before_holds.push((target, self.is_silenced(target)));
+            }
+            targets.push(target);
         }
-        self.holds.push(Hold { button, restore });
+        self.holds.push(Hold { button, targets });
         self.fire(action)
     }
 
+    /// Ends a hold. What it acted on goes back to what it was before, once no
+    /// other hold acts on it. The mixer says so even when the device does
+    /// not answer, so that nothing stays silenced for a finger long gone.
     fn end_hold(&mut self, button: Button) -> Result<(), DeviceError> {
         let Some(at) = self.holds.iter().position(|hold| hold.button == button) else {
             return Ok(());
         };
-        for (target, silenced) in self.holds.remove(at).restore {
+        let ended = self.holds.remove(at);
+        let mut sent = Ok(());
+        for target in ended.targets {
+            if self.holds.iter().any(|hold| hold.targets.contains(&target)) {
+                continue;
+            }
+            let Some(at) = self
+                .before_holds
+                .iter()
+                .position(|(held, _)| *held == target)
+            else {
+                continue;
+            };
+            let (_, silenced) = self.before_holds.remove(at);
             if self.is_silenced(target) != silenced {
-                self.silence(target, silenced)?;
+                self.set_silenced(target, silenced);
+                if sent.is_ok() {
+                    sent = self.send_silenced(target);
+                }
             }
         }
-        Ok(())
+        sent
+    }
+
+    /// Tells the device what the mixer says of a target.
+    fn send_silenced(&mut self, target: Silenced) -> Result<(), DeviceError> {
+        match target {
+            Silenced::Mic | Silenced::Channel(Channel::Mic) => {
+                self.send_mic(self.mixer.mic_silenced())?;
+            }
+            Silenced::Channel(channel) => {
+                let muted = self.mixer.muted[usize::from(channel.index())];
+                self.device.set_muted(channel, muted)?;
+            }
+        }
+        self.send_lights()
     }
 
     /// Notes which buttons went down, and does what the gestures that are

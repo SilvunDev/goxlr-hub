@@ -1,10 +1,14 @@
 //! What the buttons do, against the virtual device and a clock that only
 //! moves when the test says so.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use goxlr_hub_device::{VirtualHandle, open_virtual};
-use goxlr_hub_protocol::{Button, ButtonLight, Channel, Fader};
+use goxlr_hub_device::{
+    DeviceError, DeviceKind, Link, Session, VirtualGoXlr, VirtualHandle, open_virtual,
+};
+use goxlr_hub_protocol::{Button, ButtonLight, Channel, Fader, Packet, Request};
 use serde_json::json;
 
 use crate::gestures::ManualClock;
@@ -568,4 +572,122 @@ fn the_snapshot_tells_the_controls_what_was_touched_and_the_bank() {
     assert!(value["lastPress"].is_null());
     assert_eq!(value["touched"], json!([]));
     assert_eq!(value["bank"], "a");
+}
+
+const OTHER_PAD: Button = Button::SamplerTopRight;
+
+fn hold_mic(hub: &mut Hub, button: Button) {
+    give(
+        hub,
+        button,
+        Gesture::Hold,
+        mute(AudioTarget::Mic, MuteMode::Mute),
+    );
+}
+
+#[test]
+fn two_holds_on_the_same_target_put_back_what_the_first_one_found() {
+    let (mut hub, hands, clock) = timed_hub();
+    hold_mic(&mut hub, PAD);
+    hold_mic(&mut hub, OTHER_PAD);
+
+    hands.press(PAD);
+    assert!(after(&mut hub, &clock, 50).mic_off);
+    hands.press(OTHER_PAD);
+    assert!(after(&mut hub, &clock, 50).mic_off);
+
+    // One finger leaves, the other still holds: the microphone stays off.
+    hands.release(PAD);
+    assert!(after(&mut hub, &clock, 50).mic_off);
+    assert!(hands.state().mic_input_muted);
+
+    // The last one leaves: it is open as it was before the first hold.
+    hands.release(OTHER_PAD);
+    assert!(!after(&mut hub, &clock, 50).mic_off);
+    assert!(!hands.state().mic_input_muted);
+
+    // Either order, and a hold on the track under a fader counts as the
+    // same target as a hold on that track.
+    give(
+        &mut hub,
+        Button::Fader1Mute,
+        Gesture::Hold,
+        mute(AudioTarget::FaderTrack { fader: Fader::A }, MuteMode::Mute),
+    );
+    give(
+        &mut hub,
+        PAD,
+        Gesture::Hold,
+        track(Channel::Mic, MuteMode::Mute),
+    );
+    hands.press(Button::Fader1Mute);
+    after(&mut hub, &clock, 50);
+    hands.press(PAD);
+    after(&mut hub, &clock, 50);
+    hands.release(Button::Fader1Mute);
+    after(&mut hub, &clock, 50);
+    assert!(muted(&hands, Channel::Mic), "the pad still holds it");
+    hands.release(PAD);
+    after(&mut hub, &clock, 50);
+    assert!(!muted(&hands, Channel::Mic));
+}
+
+#[test]
+fn holds_on_one_target_are_all_let_go_with_the_device() {
+    let (mut hub, hands, clock) = timed_hub();
+    hold_mic(&mut hub, PAD);
+    hold_mic(&mut hub, OTHER_PAD);
+    hands.press(PAD);
+    after(&mut hub, &clock, 50);
+    hands.press(OTHER_PAD);
+    assert!(after(&mut hub, &clock, 50).mic_off);
+
+    hub.release_holds();
+    assert!(!hub.settings().mixer.mic_off);
+}
+
+/// A device that stops answering what it is told, but still answers readings.
+struct Deaf {
+    inner: VirtualGoXlr,
+    deaf: Arc<AtomicBool>,
+}
+
+impl Link for Deaf {
+    fn exchange(&mut self, request: &[u8]) -> Result<Vec<u8>, DeviceError> {
+        let packet = Packet::decode(request).unwrap();
+        let request_kind = Request::decode(packet.command_id, &packet.body).unwrap();
+        let reading = matches!(request_kind, Request::GetStatus | Request::GetMicLevel);
+        if self.deaf.load(Ordering::Relaxed) && !reading {
+            return Err(DeviceError::Link("deaf".into()));
+        }
+        self.inner.exchange(request)
+    }
+}
+
+#[test]
+fn a_hold_the_device_does_not_hear_end_still_puts_the_mixer_back() {
+    let (inner, hands) = VirtualGoXlr::new();
+    let deaf = Arc::new(AtomicBool::new(false));
+    let link = Deaf {
+        inner,
+        deaf: deaf.clone(),
+    };
+    let device = Session::open(link, DeviceKind::Hardware).unwrap();
+    let mut hub = Hub::connect(Box::new(device)).unwrap();
+    let clock = ManualClock::default();
+    hub.clock = Box::new(clock.clone());
+    hub.poll().unwrap();
+    hold_mic(&mut hub, PAD);
+
+    hands.press(PAD);
+    assert!(after(&mut hub, &clock, 50).mic_off);
+    deaf.store(true, Ordering::Relaxed);
+    hands.release(PAD);
+    clock.advance(Duration::from_millis(50));
+    assert!(hub.poll().is_err(), "the device did not hear the end");
+
+    // The mixer is what the app sends the device when it is taken again.
+    assert!(!hub.settings().mixer.mic_off);
+    hub.release_holds();
+    assert!(!hub.settings().mixer.mic_off);
 }
