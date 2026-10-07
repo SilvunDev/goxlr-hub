@@ -3,6 +3,7 @@
 //! receives a [`Snapshot`].
 
 pub mod backup;
+mod gestures;
 mod library;
 mod mic;
 mod station;
