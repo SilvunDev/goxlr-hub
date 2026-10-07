@@ -1,7 +1,7 @@
 //! Chooses the device the app shows: the real GoXLR when it can be had, the
 //! virtual one otherwise, and says which and why.
 
-use goxlr_hub_device::{Device, DeviceError, OpenError, open_virtual};
+use goxlr_hub_device::{Device, DeviceError, OpenError, VirtualHandle, open_virtual};
 use goxlr_hub_protocol::Channel;
 use serde::Serialize;
 
@@ -57,6 +57,8 @@ pub struct Station<P: Port> {
     port: P,
     /// Always there, shown whenever the real device is not.
     demo: Hub,
+    /// The fingers on the virtual device.
+    hands: VirtualHandle,
     hardware: Option<Hub>,
     connection: Connection,
     /// What the device shown is set to, real or virtual: a real device that
@@ -81,10 +83,11 @@ impl<P: Port> Station<P> {
     /// Starts on the virtual device, set as asked; `scan` looks for the real
     /// one and brings it to the same settings.
     pub fn new(port: P, settings: Settings) -> Result<Self, DeviceError> {
-        let (device, _) = open_virtual()?;
+        let (device, hands) = open_virtual()?;
         Ok(Self {
             port,
             demo: Hub::adopt(Box::new(device), Some(&for_show(&settings)))?,
+            hands,
             hardware: None,
             connection: Connection::Demo,
             settings,
@@ -123,16 +126,21 @@ impl<P: Port> Station<P> {
         }
 
         self.connection = match self.port.open() {
-            Ok(device) => match Hub::adopt(device, Some(&self.settings)) {
-                Ok(hub) => {
-                    self.hardware = Some(hub);
-                    self.lost = false;
-                    Connection::Hardware
+            Ok(device) => {
+                // A button held on the virtual device has no finger left.
+                self.demo.release_holds();
+                self.keep_from_demo(None);
+                match Hub::adopt(device, Some(&self.settings)) {
+                    Ok(hub) => {
+                        self.hardware = Some(hub);
+                        self.lost = false;
+                        Connection::Hardware
+                    }
+                    Err(error) => Connection::Unreachable {
+                        reason: error.to_string(),
+                    },
                 }
-                Err(error) => Connection::Unreachable {
-                    reason: error.to_string(),
-                },
-            },
+            }
             Err(OpenError::Absent) => Connection::Demo,
             // The other program sets the volumes as it pleases. The fader
             // assignment, the routing and the microphone are put back by the
@@ -148,6 +156,17 @@ impl<P: Port> Station<P> {
 
     /// Does what the interface asked, on the device shown.
     pub fn apply(&mut self, intent: Intent) -> Result<(), DeviceError> {
+        // Only the virtual device is pressed from the screen.
+        if let Intent::PressButton { button, down } = intent {
+            if self.hardware.is_none() {
+                if down {
+                    self.hands.press(button);
+                } else {
+                    self.hands.release(button);
+                }
+            }
+            return Ok(());
+        }
         if let Some(hub) = &mut self.hardware {
             match hub.apply(intent) {
                 Ok(()) => self.settings = hub.settings(),
@@ -196,7 +215,9 @@ impl<P: Port> Station<P> {
 
     /// Lets the real device go and shows its settings on the virtual one.
     fn release(&mut self) {
-        if let Some(hub) = self.hardware.take() {
+        if let Some(mut hub) = self.hardware.take() {
+            // The finger that held a button cannot come up any more.
+            hub.release_holds();
             self.settings = hub.settings();
         }
         // The virtual device always answers.
@@ -224,6 +245,8 @@ impl<P: Port> Station<P> {
             }
         }
         let snapshot = self.demo.poll()?;
+        // Buttons pressed on the virtual device change what is set.
+        self.keep_from_demo(None);
         Ok(self.stamp(snapshot))
     }
 
@@ -513,7 +536,7 @@ mod tests {
         assert_eq!(
             settings.last(),
             Some(&Request::SetButtonLights {
-                lights: ButtonLights::default()
+                lights: crate::tests::resting_lights()
             })
         );
         assert_eq!(bench.volumes_received(), []);
@@ -604,7 +627,7 @@ mod tests {
         assert_eq!(
             after.settings_received().last(),
             Some(&Request::SetButtonLights {
-                lights: ButtonLights::default()
+                lights: crate::tests::resting_lights()
             })
         );
     }

@@ -35,8 +35,8 @@ pub struct VirtualState {
     /// The microphone processing received as microphone parameters.
     pub mic_params: BTreeMap<MicParamKey, f32>,
     pub pressed: ButtonSet,
-    /// Buttons pressed and released between two readings: the next reading
-    /// still shows them held, once.
+    /// Buttons pressed since the last reading: the next reading shows them
+    /// held, once, even if they were released already.
     tapped: ButtonSet,
     pub encoders: [i8; 4],
     mic_reads: u64,
@@ -246,20 +246,17 @@ impl VirtualHandle {
         state.volumes[usize::from(channel.index())] = position;
     }
 
+    /// Presses a button. A reading that comes after the button was released
+    /// still sees it held, once, so that a click shorter than a reading is
+    /// not lost.
     pub fn press(&self, button: Button) {
-        lock(&self.state).pressed.insert(button);
+        let mut state = lock(&self.state);
+        state.pressed.insert(button);
+        state.tapped.insert(button);
     }
 
     pub fn release(&self, button: Button) {
         lock(&self.state).pressed.remove(button);
-    }
-
-    /// Presses and releases a button at once. The next reading still sees it
-    /// held, so that a click shorter than a reading is not lost.
-    pub fn tap(&self, button: Button) {
-        let mut state = lock(&self.state);
-        state.pressed.remove(button);
-        state.tapped.insert(button);
     }
 }
 
@@ -386,7 +383,8 @@ mod tests {
     #[test]
     fn a_tap_between_two_readings_is_seen_once() {
         let (mut device, hands) = open_virtual().unwrap();
-        hands.tap(Button::SamplerTopLeft);
+        hands.press(Button::SamplerTopLeft);
+        hands.release(Button::SamplerTopLeft);
         let seen = |device: &mut Session<VirtualGoXlr>| {
             device.status().unwrap().pressed.iter().collect::<Vec<_>>()
         };
@@ -395,7 +393,8 @@ mod tests {
 
         // A button still held stays seen, tapped or not.
         hands.press(Button::Bleep);
-        hands.tap(Button::SamplerTopLeft);
+        hands.press(Button::SamplerTopLeft);
+        hands.release(Button::SamplerTopLeft);
         assert_eq!(seen(&mut device), [Button::SamplerTopLeft, Button::Bleep]);
         assert_eq!(seen(&mut device), [Button::Bleep]);
         hands.release(Button::Bleep);

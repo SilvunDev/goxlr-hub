@@ -7,7 +7,7 @@ use goxlr_hub_device::DeviceError;
 use serde::{Deserialize, Serialize};
 
 use crate::library::{Assembly, Kind, Library, MixPiece, ProfileError};
-use crate::{Connection, Intent, MicState, Port, Settings, Snapshot, Station};
+use crate::{Connection, Controls, Intent, MicState, Port, Settings, Snapshot, Station};
 
 /// What the interface asks of the profiles.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -54,6 +54,7 @@ pub struct ProfilesView {
     pub profiles: Vec<String>,
     pub mixes: Vec<String>,
     pub mics: Vec<String>,
+    pub controls: Vec<String>,
     pub dirty: Dirty,
     /// Something was changed and not saved.
     pub unsaved: bool,
@@ -65,6 +66,7 @@ pub struct ActiveView {
     pub profile: String,
     pub mix: String,
     pub mic: String,
+    pub controls: String,
 }
 
 /// What differs from what is saved.
@@ -72,6 +74,7 @@ pub struct ActiveView {
 pub struct Dirty {
     pub mix: bool,
     pub mic: bool,
+    pub controls: bool,
     /// The profile is made of other pieces than the ones in use.
     pub profile: bool,
 }
@@ -81,6 +84,7 @@ struct Saved {
     assembly: Assembly,
     mix: MixPiece,
     mic: MicState,
+    controls: Controls,
 }
 
 pub struct Studio<P: Port> {
@@ -103,6 +107,7 @@ impl<P: Port> Studio<P> {
         let mut settings = Settings::unknown();
         saved.mix.put(&mut settings.mixer);
         settings.mic = saved.mic.clone();
+        settings.controls = saved.controls.clone();
         Ok(Self {
             station: Station::new(port, settings)?,
             library,
@@ -133,10 +138,12 @@ impl<P: Port> Studio<P> {
             assembly: library.new_assembly(&profile),
             mix: MixPiece::of(&Settings::unknown().mixer),
             mic: MicState::unknown(),
+            controls: Controls::default(),
         };
         let _ = library
             .write_mix(&saved.assembly.mix, &saved.mix)
             .and_then(|()| library.write_mic(&saved.assembly.mic, &saved.mic))
+            .and_then(|()| library.write_controls(&saved.assembly.controls, &saved.controls))
             .and_then(|()| library.write_empty_pieces())
             .and_then(|()| library.write_profile(&profile, &saved.assembly))
             .and_then(|()| library.set_last(&profile));
@@ -148,6 +155,12 @@ impl<P: Port> Studio<P> {
         Ok(Saved {
             mix: library.read_mix(&assembly.mix)?,
             mic: library.read_mic(&assembly.mic)?,
+            // A profile from before the controls were kept names a piece
+            // that may never have been written.
+            controls: match library.read_controls(&assembly.controls) {
+                Err(ProfileError::NotFound) => Controls::default(),
+                controls => controls?,
+            },
             assembly,
         })
     }
@@ -183,6 +196,7 @@ impl<P: Port> Studio<P> {
         Dirty {
             mix: !self.saved.mix.matches(&settings.mixer),
             mic: self.saved.mic != settings.mic,
+            controls: self.saved.controls != settings.controls,
             profile: self.active != self.saved.assembly,
         }
     }
@@ -190,7 +204,7 @@ impl<P: Port> Studio<P> {
     /// Something was changed and not saved.
     pub fn unsaved(&self) -> bool {
         let dirty = self.dirty();
-        dirty.mix || dirty.mic || dirty.profile
+        dirty.mix || dirty.mic || dirty.controls || dirty.profile
     }
 
     fn view(&self) -> ProfilesView {
@@ -199,10 +213,12 @@ impl<P: Port> Studio<P> {
                 profile: self.profile.clone(),
                 mix: self.active.mix.clone(),
                 mic: self.active.mic.clone(),
+                controls: self.active.controls.clone(),
             },
             profiles: self.library.names(Kind::Profile).to_vec(),
             mixes: self.library.names(Kind::Mix).to_vec(),
             mics: self.library.names(Kind::Mic).to_vec(),
+            controls: self.library.names(Kind::Controls).to_vec(),
             dirty: self.dirty(),
             unsaved: self.unsaved(),
         }
@@ -220,12 +236,18 @@ impl<P: Port> Studio<P> {
         }
     }
 
-    /// Brings the device shown to a mix and a microphone. The mutes stay as
-    /// they are.
-    fn load(&mut self, mix: &MixPiece, mic: &MicState) -> Result<(), ProfileError> {
+    /// Brings the device shown to a mix, a microphone and controls. The
+    /// mutes stay as they are.
+    fn load(
+        &mut self,
+        mix: &MixPiece,
+        mic: &MicState,
+        controls: &Controls,
+    ) -> Result<(), ProfileError> {
         let mut settings = self.station.settings().clone();
         mix.put(&mut settings.mixer);
         settings.mic = mic.clone();
+        settings.controls = controls.clone();
         self.station
             .load(settings)
             .map_err(|_| ProfileError::Storage)
@@ -235,7 +257,7 @@ impl<P: Port> Studio<P> {
         match kind {
             Kind::Profile => {
                 let saved = Self::read(&self.library, name)?;
-                self.load(&saved.mix, &saved.mic)?;
+                self.load(&saved.mix, &saved.mic, &saved.controls)?;
                 self.profile = name.into();
                 self.active = saved.assembly.clone();
                 self.saved = saved;
@@ -245,17 +267,29 @@ impl<P: Port> Studio<P> {
             }
             Kind::Mix => {
                 let mix = self.library.read_mix(name)?;
-                let mic = self.station.settings().mic.clone();
-                self.load(&mix, &mic)?;
+                let settings = self.station.settings();
+                let (mic, controls) = (settings.mic.clone(), settings.controls.clone());
+                self.load(&mix, &mic, &controls)?;
                 self.active.mix = name.into();
                 self.saved.mix = mix;
             }
             Kind::Mic => {
                 let mic = self.library.read_mic(name)?;
-                let mix = MixPiece::of(&self.station.settings().mixer);
-                self.load(&mix, &mic)?;
+                let settings = self.station.settings();
+                let mix = MixPiece::of(&settings.mixer);
+                let controls = settings.controls.clone();
+                self.load(&mix, &mic, &controls)?;
                 self.active.mic = name.into();
                 self.saved.mic = mic;
+            }
+            Kind::Controls => {
+                let controls = self.library.read_controls(name)?;
+                let settings = self.station.settings();
+                let mix = MixPiece::of(&settings.mixer);
+                let mic = settings.mic.clone();
+                self.load(&mix, &mic, &controls)?;
+                self.active.controls = name.into();
+                self.saved.controls = controls;
             }
         }
         Ok(())
@@ -277,6 +311,14 @@ impl<P: Port> Studio<P> {
         Ok(())
     }
 
+    fn save_controls(&mut self, name: &str) -> Result<(), ProfileError> {
+        let controls = self.station.settings().controls.clone();
+        self.library.write_controls(name, &controls)?;
+        self.active.controls = name.into();
+        self.saved.controls = controls;
+        Ok(())
+    }
+
     fn save_profile(&mut self, name: &str) -> Result<(), ProfileError> {
         self.library.write_profile(name, &self.active)?;
         self.profile = name.into();
@@ -290,9 +332,11 @@ impl<P: Port> Studio<P> {
         match kind {
             Kind::Mix => self.save_mix(&active.mix),
             Kind::Mic => self.save_mic(&active.mic),
+            Kind::Controls => self.save_controls(&active.controls),
             Kind::Profile => {
                 self.save_mix(&active.mix)?;
                 self.save_mic(&active.mic)?;
+                self.save_controls(&active.controls)?;
                 self.save_profile(&self.profile.clone())
             }
         }
@@ -313,10 +357,12 @@ impl<P: Port> Studio<P> {
         match kind {
             Kind::Mix => self.save_mix(&name),
             Kind::Mic => self.save_mic(&name),
+            Kind::Controls => self.save_controls(&name),
             Kind::Profile => {
                 let pieces = self.library.new_assembly(&name);
                 self.save_mix(&pieces.mix)?;
                 self.save_mic(&pieces.mic)?;
+                self.save_controls(&pieces.controls)?;
                 self.save_profile(&name)
             }
         }
@@ -344,6 +390,13 @@ impl<P: Port> Studio<P> {
                     }
                 }
             }
+            Kind::Controls => {
+                for controls in [&mut self.active.controls, &mut self.saved.assembly.controls] {
+                    if controls == name {
+                        controls.clone_from(&to);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -360,8 +413,11 @@ impl<P: Port> Studio<P> {
             .duplicate(Kind::Mix, &assembly.mix, &pieces.mix)?;
         self.library
             .duplicate(Kind::Mic, &assembly.mic, &pieces.mic)?;
+        self.library
+            .duplicate(Kind::Controls, &assembly.controls, &pieces.controls)?;
         assembly.mix = pieces.mix;
         assembly.mic = pieces.mic;
+        assembly.controls = pieces.controls;
         self.library.write_profile(&to, &assembly)
     }
 
@@ -370,6 +426,7 @@ impl<P: Port> Studio<P> {
             Kind::Profile => self.profile == name,
             Kind::Mix => self.active.mix == name,
             Kind::Mic => self.active.mic == name,
+            Kind::Controls => self.active.controls == name,
         };
         if in_use {
             return Err(ProfileError::InUse);
@@ -457,11 +514,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&view).unwrap(),
             json!({
-                "active": { "profile": "Default", "mix": "Default", "mic": "Default" },
+                "active": {
+                    "profile": "Default", "mix": "Default", "mic": "Default", "controls": "Default"
+                },
                 "profiles": ["Default"],
                 "mixes": ["Default"],
                 "mics": ["Default"],
-                "dirty": { "mix": false, "mic": false, "profile": false },
+                "controls": ["Default"],
+                "dirty": { "mix": false, "mic": false, "controls": false, "profile": false },
                 "unsaved": false,
             })
         );
