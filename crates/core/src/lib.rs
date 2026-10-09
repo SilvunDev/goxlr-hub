@@ -403,6 +403,8 @@ pub struct Hub {
     encoders: Option<[i8; Wheel::COUNT]>,
     /// Profiles asked for by buttons and not loaded yet.
     loads: Vec<Load>,
+    /// Tracks whose volume the app set since the last time it was asked.
+    volumes_set: Vec<Channel>,
 }
 
 impl Hub {
@@ -453,6 +455,7 @@ impl Hub {
             last_press: None,
             encoders: None,
             loads: Vec::new(),
+            volumes_set: Vec::new(),
         };
         hub.send_all()?;
         Ok(hub)
@@ -542,6 +545,12 @@ impl Hub {
         self.recognizer = Recognizer::default();
         self.held = None;
         self.encoders = None;
+    }
+
+    /// The tracks whose volume the app set, from the screen, a button or a
+    /// dial, since the last time it was asked.
+    pub(crate) fn take_volumes_set(&mut self) -> Vec<Channel> {
+        std::mem::take(&mut self.volumes_set)
     }
 
     /// The profiles the buttons asked for since the last time, in order.
@@ -639,6 +648,9 @@ impl Hub {
     fn set_volume(&mut self, channel: Channel, volume: u8) -> Result<(), DeviceError> {
         self.send_volume(channel, volume)?;
         self.mixer.volumes[usize::from(channel.index())] = Some(volume);
+        if !self.volumes_set.contains(&channel) {
+            self.volumes_set.push(channel);
+        }
         Ok(())
     }
 

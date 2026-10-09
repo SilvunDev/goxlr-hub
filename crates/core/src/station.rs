@@ -130,7 +130,8 @@ impl<P: Port> Station<P> {
                 // A button held on the virtual device has no finger left.
                 self.demo.release_holds();
                 self.let_go_of_virtual_buttons();
-                self.keep_from_demo(None);
+                let set = self.demo.take_volumes_set();
+                self.keep_from_demo(&set);
                 match Hub::adopt(device, Some(&self.settings)) {
                     Ok(hub) => {
                         self.hardware = Some(hub);
@@ -177,10 +178,7 @@ impl<P: Port> Station<P> {
             }
             _ => {}
         }
-        let set_volume = match intent {
-            Intent::SetVolume { channel, .. } => Some(channel),
-            _ => None,
-        };
+
         if let Some(hub) = &mut self.hardware {
             match hub.apply(intent) {
                 Ok(()) => self.settings = hub.settings(),
@@ -189,7 +187,8 @@ impl<P: Port> Station<P> {
             return Ok(());
         }
         self.demo.apply(intent)?;
-        self.keep_from_demo(set_volume);
+        let set = self.demo.take_volumes_set();
+        self.keep_from_demo(&set);
         Ok(())
     }
 
@@ -228,11 +227,11 @@ impl<P: Port> Station<P> {
     /// What was set on the virtual device is kept for the real one, but for
     /// the volumes its faders show: they say nothing of a real device. A
     /// volume is only known once it was set.
-    fn keep_from_demo(&mut self, set_volume: Option<Channel>) {
+    fn keep_from_demo(&mut self, set_volumes: &[Channel]) {
         let mut settings = self.demo.settings();
         for channel in Channel::ALL {
             let at = usize::from(channel.index());
-            let set = set_volume == Some(channel);
+            let set = set_volumes.contains(&channel);
             if self.settings.mixer.volumes[at].is_none() && !set {
                 settings.mixer.volumes[at] = None;
             }
@@ -274,8 +273,10 @@ impl<P: Port> Station<P> {
             }
         }
         let snapshot = self.demo.poll()?;
-        // Buttons pressed on the virtual device change what is set.
-        self.keep_from_demo(None);
+        // Buttons pressed and dials turned on the virtual device change what
+        // is set.
+        let set = self.demo.take_volumes_set();
+        self.keep_from_demo(&set);
         Ok(self.stamp(snapshot))
     }
 
@@ -1251,6 +1252,12 @@ mod tests {
         let snapshot = virtual_station.poll().unwrap();
         let headphones = snapshot.channels[usize::from(Channel::Headphones.index())];
         assert_eq!(headphones.volume, Some(224));
+        // What a dial set is what the real device is brought to when it comes
+        // and what a profile saves, like a volume set from the screen.
+        assert_eq!(
+            virtual_station.settings().mixer.volumes[usize::from(Channel::Headphones.index())],
+            Some(224)
+        );
 
         // The real device is not turned by a click on a screen.
         let (device, bench) = real_device();
