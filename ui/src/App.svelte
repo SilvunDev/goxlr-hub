@@ -15,7 +15,13 @@
   import StatusBanner from './lib/components/StatusBanner.svelte';
   import UnsavedBanner from './lib/components/UnsavedBanner.svelte';
   import UpdateBanner from './lib/components/UpdateBanner.svelte';
-  import { connectionOf, profilesOf, type ProfileError, type Snapshot } from './lib/device';
+  import {
+    connectionOf,
+    profilesOf,
+    type ButtonId,
+    type ProfileError,
+    type Snapshot,
+  } from './lib/device';
   import { i18n } from './lib/i18n/index.svelte';
   import type { SectionId } from './lib/nav';
   import { updates } from './lib/updates.svelte';
@@ -26,6 +32,8 @@
   /** The user asked to quit while something is not saved. */
   let quitting = $state(false);
   let saveError = $state<ProfileError | null>(null);
+  /** A button the Mixer asked to see in the Controls screen. */
+  let opened = $state<{ button: ButtonId; seq: number } | null>(null);
 
   const connection = $derived(device ? connectionOf(device) : null);
   const profiles = $derived(device ? profilesOf(device) : null);
@@ -44,6 +52,16 @@
     };
   });
 
+  function openButton(button: ButtonId) {
+    opened = { button, seq: (opened?.seq ?? 0) + 1 };
+    current = 'controls';
+  }
+
+  function go(section: SectionId) {
+    opened = null;
+    current = section;
+  }
+
   /** Saves the profile in use with its pieces. Says whether it was done. */
   async function save(): Promise<boolean> {
     saveError = await runProfileCommand({ type: 'save', kind: 'profile' });
@@ -56,7 +74,7 @@
 </script>
 
 <div class="frame">
-  <Sidebar {current} onselect={(section) => (current = section)} />
+  <Sidebar {current} onselect={go} />
   <div class="main">
     <div>
       {#if connection && connection.state !== 'hardware'}
@@ -84,7 +102,7 @@
       {:else if current === 'profiles'}
         <Profiles {profiles} />
       {:else if current === 'mixer'}
-        <Mixer {device} />
+        <Mixer {device} onopen={openButton} />
       {:else if current === 'mic'}
         <Mic {device} />
       {:else if current === 'channels'}
@@ -92,7 +110,7 @@
       {:else if current === 'routing'}
         <Routing {device} />
       {:else if current === 'controls'}
-        <Controls {device} />
+        <Controls {device} focus={opened} />
       {:else}
         <ComingSoon title={i18n.t.nav[current]} />
       {/if}

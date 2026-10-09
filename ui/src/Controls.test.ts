@@ -10,6 +10,7 @@ import {
   type ControlsView,
   type MicView,
   type Snapshot,
+  type WheelView,
 } from './lib/device';
 import { i18n } from './lib/i18n/index.svelte';
 import { updates } from './lib/updates.svelte';
@@ -647,6 +648,476 @@ describe('Controls', () => {
       expect(card.getByRole('radio', { name: /Keys/ }).textContent).toContain('Not saved');
       await fireEvent.click(card.getByRole('button', { name: 'Save' }));
       expect(feed.commands).toEqual([{ type: 'save', kind: 'controls' }]);
+    });
+  });
+
+  describe('audio actions', () => {
+    type Route = Extract<Action, { type: 'route' }>;
+    type Volume = Extract<Action, { type: 'volume' }>;
+    const route = (
+      input: Route['input'],
+      output: Route['output'],
+      mode: Route['mode'] = 'off',
+    ): Action => ({ type: 'route', input, output, mode });
+    const volume = (
+      mode: Volume['mode'],
+      percent: number,
+      target: Volume['target'] = { type: 'channel', channel: 'headphones' },
+    ): Action => ({ type: 'volume', target, mode, percent });
+
+    const options = (name: string) =>
+      within(screen.getByRole('combobox', { name }))
+        .getAllByRole('option')
+        .map((option) => option.textContent?.trim());
+
+    it('offers three kinds of audio action, two for a hold', async () => {
+      await open(snapshot({ controls: controlsView({ samplerTopLeft: { short: track('chat') } }) }));
+      await fireEvent.click(cell('Pad top left'));
+      expect(options('Kind of action')).toEqual([
+        'Mute or open a track',
+        'Cut a track toward one output',
+        'Set a volume',
+      ]);
+
+      await fireEvent.click(screen.getByRole('tab', { name: /Hold/ }));
+      await report(
+        snapshot({
+          controls: controlsView({ samplerTopLeft: { hold: mute({ type: 'mic' }, 'mute') } }),
+        }),
+      );
+      expect(options('Kind of action')).toEqual([
+        'Mute or open a track',
+        'Cut a track toward one output',
+      ]);
+    });
+
+    it('cuts a track toward one output, and says it in the cell', async () => {
+      await open(
+        snapshot({
+          controls: controlsView({
+            samplerTopLeft: { short: mute({ type: 'mic' }) },
+            samplerTopRight: { short: route('music', 'broadcastMix') },
+          }),
+        }),
+      );
+      expect(cell('Pad top right').getAttribute('aria-label')).toBe(
+        'Pad top right: Cut Music to Broadcast Mix',
+      );
+
+      await fireEvent.click(cell('Pad top left'));
+      await fireEvent.change(screen.getByRole('combobox', { name: 'Kind of action' }), {
+        target: { value: 'route' },
+      });
+      expect(feed.sent.at(-1)).toEqual({
+        type: 'setGesture',
+        button: 'samplerTopLeft',
+        gesture: 'short',
+        action: { type: 'route', input: 'music', output: 'broadcastMix', mode: 'toggle' },
+      });
+    });
+
+    it('chooses the track, the output and what happens', async () => {
+      await open(
+        snapshot({
+          controls: controlsView({ samplerTopLeft: { short: route('mic', 'chatMic', 'on') } }),
+        }),
+      );
+      await fireEvent.click(cell('Pad top left'));
+      expect(options('Track')).toEqual([
+        'Mic',
+        'Chat',
+        'Music',
+        'Game',
+        'Console',
+        'Line In',
+        'System',
+        'Samples',
+      ]);
+      expect(options('What happens')).toEqual(['Cut', 'Send', 'Switch']);
+      await fireEvent.change(screen.getByRole('combobox', { name: 'What happens' }), {
+        target: { value: 'toggle' },
+      });
+      expect(feed.sent.at(-1)).toMatchObject({ action: { mode: 'toggle', output: 'chatMic' } });
+
+      // Chat cannot be sent back to the voice chat: another output is taken.
+      await fireEvent.change(screen.getByRole('combobox', { name: 'Track' }), {
+        target: { value: 'chat' },
+      });
+      expect(feed.sent.at(-1)).toMatchObject({
+        action: { type: 'route', input: 'chat', output: 'headphones' },
+      });
+
+      await report(
+        snapshot({
+          controls: controlsView({ samplerTopLeft: { short: route('chat', 'headphones') } }),
+        }),
+      );
+      expect(options('Output')).not.toContain('Chat mic');
+      await fireEvent.change(screen.getByRole('combobox', { name: 'Output' }), {
+        target: { value: 'lineOut' },
+      });
+      expect(feed.sent.at(-1)).toMatchObject({ action: { input: 'chat', output: 'lineOut' } });
+    });
+
+    it('words a held cut in terms of the finger', async () => {
+      await open(
+        snapshot({
+          controls: controlsView({ micMute: { hold: route('music', 'broadcastMix', 'off') } }),
+        }),
+      );
+      expect(cell('Mic').getAttribute('aria-label')).toBe('Mic: Cut Music to Broadcast Mix (held)');
+      await fireEvent.click(cell('Mic'));
+      await fireEvent.click(screen.getByRole('tab', { name: /Hold/ }));
+      expect(options('What happens')).toEqual([
+        'Cut while pressed',
+        'Sent while pressed',
+        'Reversed while pressed',
+      ]);
+    });
+
+    it('starts a volume by lowering it a little, never by raising it', async () => {
+      await open(snapshot({ controls: controlsView({ samplerTopLeft: { short: track('chat') } }) }));
+      await fireEvent.click(cell('Pad top left'));
+      await fireEvent.change(screen.getByRole('combobox', { name: 'Kind of action' }), {
+        target: { value: 'volume' },
+      });
+      expect(feed.sent.at(-1)).toEqual({
+        type: 'setGesture',
+        button: 'samplerTopLeft',
+        gesture: 'short',
+        action: {
+          type: 'volume',
+          target: { type: 'channel', channel: 'headphones' },
+          mode: 'down',
+          percent: 5,
+        },
+      });
+    });
+
+    it('sets, raises or lowers a volume by an amount', async () => {
+      await open(
+        snapshot({
+          controls: controlsView({
+            samplerTopLeft: { short: volume('down', 5) },
+            samplerTopRight: { short: volume('set', 40, { type: 'faderTrack', fader: 'c' }) },
+            samplerBottomLeft: { short: volume('up', 10, { type: 'mic' }) },
+          }),
+        }),
+      );
+      expect(cell('Pad top left').getAttribute('aria-label')).toBe(
+        'Pad top left: Lower Headphones by 5%',
+      );
+      expect(cell('Pad top right').getAttribute('aria-label')).toBe(
+        'Pad top right: Volume of fader C at 40%',
+      );
+      expect(cell('Pad bottom left').getAttribute('aria-label')).toBe(
+        'Pad bottom left: Raise mic by 10%',
+      );
+
+      await fireEvent.click(cell('Pad top left'));
+      expect(options('What happens')).toEqual(['Set to', 'Raise by', 'Lower by']);
+      await fireEvent.change(screen.getByRole('combobox', { name: 'What happens' }), {
+        target: { value: 'up' },
+      });
+      expect(feed.sent.at(-1)).toMatchObject({ action: { mode: 'up', percent: 5 } });
+      await fireEvent.change(screen.getByRole('combobox', { name: 'What to act on' }), {
+        target: { value: 'channel:music' },
+      });
+      expect(feed.sent.at(-1)).toMatchObject({
+        action: { type: 'volume', target: { type: 'channel', channel: 'music' } },
+      });
+      const amount = screen.getByRole('slider', { name: 'Amount' }) as HTMLInputElement;
+      expect(amount.value).toBe('5');
+      await fireEvent.input(amount, { target: { value: '12' } });
+      expect(feed.sent.at(-1)).toMatchObject({ action: { type: 'volume', percent: 12 } });
+      expect(screen.getByText(/starts from 50%/)).toBeTruthy();
+    });
+  });
+
+  describe('switching profile from a button', () => {
+    const profiles = (): NonNullable<Snapshot['profiles']> => ({
+      active: { profile: 'Default', mix: 'Default', mic: 'Default', controls: 'Default' },
+      profiles: ['Default', 'Stream'],
+      mixes: ['Default', 'Night'],
+      mics: ['Default', 'Radio'],
+      controls: ['Default', 'Keys'],
+      dirty: { profile: false, mix: false, mic: false, controls: false },
+      unsaved: false,
+    });
+    const to = (kind: 'profile' | 'mix' | 'mic' | 'controls', name: string): Action => ({
+      type: 'profile',
+      kind,
+      name,
+    });
+    const options = (name: string) =>
+      within(screen.getByRole('combobox', { name }))
+        .getAllByRole('option')
+        .map((option) => option.textContent?.trim());
+
+    it('offers it for a press, not for a hold, and only when the profiles are known', async () => {
+      await open(snapshot({ profiles: profiles() }));
+      await fireEvent.click(cell('Pad top left'));
+      expect(options('Action')).toEqual(['Nothing', 'Audio', 'Switch profile', 'Pad bank']);
+      await fireEvent.click(screen.getByRole('tab', { name: /Hold/ }));
+      expect(options('Action')).toEqual(['Nothing', 'Audio']);
+    });
+
+    it('does not offer it when the device does not tell the profiles', async () => {
+      await open();
+      await fireEvent.click(cell('Pad top left'));
+      expect(options('Action')).toEqual(['Nothing', 'Audio', 'Pad bank']);
+    });
+
+    it('starts on a profile other than the one in use, and says it switches without asking', async () => {
+      await open(snapshot({ profiles: profiles() }));
+      await fireEvent.click(cell('Pad top left'));
+      expect(screen.queryByText(/does not ask/)).toBeNull();
+      await fireEvent.change(screen.getByRole('combobox', { name: 'Action' }), {
+        target: { value: 'profile' },
+      });
+      expect(feed.sent.at(-1)).toEqual({
+        type: 'setGesture',
+        button: 'samplerTopLeft',
+        gesture: 'short',
+        action: { type: 'profile', kind: 'profile', name: 'Stream' },
+      });
+
+      await report(
+        snapshot({
+          profiles: profiles(),
+          controls: controlsView({ samplerTopLeft: { short: to('profile', 'Stream') } }),
+        }),
+      );
+      expect(
+        screen.getByText(
+          'The app switches at once and does not ask. Changes that are not saved are lost.',
+        ),
+      ).toBeTruthy();
+      expect(cell('Pad top left').getAttribute('aria-label')).toBe('Pad top left: Profile Stream');
+      expect(options('What to switch')).toEqual([
+        'The whole profile',
+        'The mix only',
+        'The microphone only',
+        'The controls only',
+      ]);
+      expect(options('Name')).toEqual(['Default', 'Stream']);
+    });
+
+    it('switches one piece, and picks the name among those of that piece', async () => {
+      await open(
+        snapshot({
+          profiles: profiles(),
+          controls: controlsView({ samplerTopLeft: { short: to('profile', 'Stream') } }),
+        }),
+      );
+      await fireEvent.click(cell('Pad top left'));
+      await fireEvent.change(screen.getByRole('combobox', { name: 'What to switch' }), {
+        target: { value: 'mix' },
+      });
+      expect(feed.sent.at(-1)).toMatchObject({
+        action: { type: 'profile', kind: 'mix', name: 'Night' },
+      });
+
+      await report(
+        snapshot({
+          profiles: profiles(),
+          controls: controlsView({ samplerTopLeft: { short: to('mic', 'Default') } }),
+        }),
+      );
+      expect(options('Name')).toEqual(['Default', 'Radio']);
+      await fireEvent.change(screen.getByRole('combobox', { name: 'Name' }), {
+        target: { value: 'Radio' },
+      });
+      expect(feed.sent.at(-1)).toMatchObject({
+        action: { type: 'profile', kind: 'mic', name: 'Radio' },
+      });
+    });
+
+    it('says when the name it switches to is gone', async () => {
+      await open(
+        snapshot({
+          profiles: profiles(),
+          controls: controlsView({ samplerTopLeft: { short: to('profile', 'Old') } }),
+        }),
+      );
+      await fireEvent.click(cell('Pad top left'));
+      expect(screen.getByRole('alert').textContent).toContain('“Old” no longer exists');
+      expect(options('Name')).toEqual(['Old', 'Default', 'Stream']);
+    });
+  });
+
+  describe('the dials', () => {
+    const dial = (
+      wheel: WheelView['wheel'],
+      step = 4,
+      target: NonNullable<WheelView['action']>['target'] = {
+        type: 'channel',
+        channel: 'headphones',
+      },
+    ): WheelView => ({ wheel, action: { type: 'volume', target, step } });
+
+    function withDials(...given: WheelView[]): ControlsView {
+      return {
+        ...controlsView(),
+        wheels: (['pitch', 'gender', 'reverb', 'echo'] as const).map(
+          (wheel) => given.find((view) => view.wheel === wheel) ?? { wheel, action: null },
+        ),
+      };
+    }
+
+    const dialCell = (name: string) => within(screen.getByRole('region', { name: 'Dials' }))
+      .getByRole('button', { name: new RegExp(`^${name} ?:`) });
+
+    it('shows the four dials with what each does', async () => {
+      await open(snapshot({ controls: withDials(dial('reverb', 6, { type: 'mic' })) }));
+      const cells = block('Dials').getAllByRole('button', { name: /dial ?:/ });
+      expect(cells.map((c) => c.getAttribute('aria-label'))).toEqual([
+        'Pitch dial: Nothing',
+        'Gender dial: Nothing',
+        'Reverb dial: Volume of mic, 6% a notch',
+        'Echo dial: Nothing',
+      ]);
+    });
+
+    it('copes with a state that tells no dials', async () => {
+      await open();
+      const cells = block('Dials').getAllByRole('button', { name: /dial ?:/ });
+      expect(cells.map((c) => c.getAttribute('aria-label'))).toEqual([
+        'Pitch dial: Nothing',
+        'Gender dial: Nothing',
+        'Reverb dial: Nothing',
+        'Echo dial: Nothing',
+      ]);
+    });
+
+    it('gives a dial a volume, then a track and a step', async () => {
+      await open(snapshot({ controls: withDials() }));
+      expect(dialCell('Pitch dial').getAttribute('aria-pressed')).toBe('false');
+      await fireEvent.click(dialCell('Pitch dial'));
+      expect(dialCell('Pitch dial').getAttribute('aria-pressed')).toBe('true');
+      expect(screen.queryByText('Choose a button to set what it does.')).toBeNull();
+      const panel = within(screen.getByRole('region', { name: 'Pitch dial' }));
+      expect(
+        within(panel.getByRole('combobox', { name: 'What the dial does' }))
+          .getAllByRole('option')
+          .map((option) => option.textContent?.trim()),
+      ).toEqual(['Nothing', 'Volume of a track']);
+
+      await fireEvent.change(panel.getByRole('combobox', { name: 'What the dial does' }), {
+        target: { value: 'volume' },
+      });
+      expect(feed.sent.at(-1)).toEqual({
+        type: 'setWheel',
+        wheel: 'pitch',
+        action: { type: 'volume', target: { type: 'channel', channel: 'headphones' }, step: 4 },
+      });
+
+      await report(snapshot({ controls: withDials(dial('pitch')) }));
+      const target = screen.getByRole('combobox', { name: 'What to act on' }) as HTMLSelectElement;
+      expect(target.value).toBe('channel:headphones');
+      await fireEvent.change(target, { target: { value: 'fader:b' } });
+      expect(feed.sent.at(-1)).toEqual({
+        type: 'setWheel',
+        wheel: 'pitch',
+        action: { type: 'volume', target: { type: 'faderTrack', fader: 'b' }, step: 4 },
+      });
+      const step = screen.getByRole('slider', { name: 'Each notch moves the volume by' });
+      expect((step as HTMLInputElement).value).toBe('4');
+      expect(step.getAttribute('max')).toBe('10');
+      await fireEvent.input(step, { target: { value: '7' } });
+      expect(feed.sent.at(-1)).toMatchObject({ action: { step: 7 } });
+      expect(screen.getByText(/starts from 50%/)).toBeTruthy();
+
+      await fireEvent.change(screen.getByRole('combobox', { name: 'What the dial does' }), {
+        target: { value: 'none' },
+      });
+      expect(feed.sent.at(-1)).toEqual({ type: 'setWheel', wheel: 'pitch', action: null });
+    });
+
+    it('turns a dial of the virtual device from the screen, and never a real one', async () => {
+      await open(snapshot({ controls: withDials() }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Turn Echo dial up one notch' }));
+      expect(feed.sent.at(-1)).toEqual({ type: 'turnWheel', wheel: 'echo', notches: 1 });
+      await fireEvent.click(screen.getByRole('button', { name: 'Turn Pitch dial down one notch' }));
+      expect(feed.sent.at(-1)).toEqual({ type: 'turnWheel', wheel: 'pitch', notches: -1 });
+
+      await report(
+        snapshot({ connection: { state: 'hardware' }, device: real, controls: withDials() }),
+      );
+      expect(screen.queryByRole('button', { name: /Turn .* dial/ })).toBeNull();
+    });
+
+    it('speaks French', async () => {
+      await open(snapshot({ controls: withDials(dial('gender', 3)) }));
+      i18n.setLocale('fr');
+      await tick();
+      expect(screen.getByRole('region', { name: 'Molettes' })).toBeTruthy();
+      const cells = within(screen.getByRole('region', { name: 'Molettes' })).getAllByRole(
+        'button',
+        { name: /Molette .* ?:/ },
+      );
+      expect(cells.map((c) => c.getAttribute('aria-label'))).toEqual([
+        'Molette hauteur : Rien',
+        'Molette genre : Règle Casque, 3 % par cran',
+        'Molette réverbe : Rien',
+        'Molette écho : Rien',
+      ]);
+    });
+  });
+
+  describe('the faders', () => {
+    it('shows the track and the volume of each, and changes the track', async () => {
+      await open();
+      const faders = block('Faders');
+      const select = (letter: string) =>
+        faders.getByRole('combobox', { name: `Channel of fader ${letter}` }) as HTMLSelectElement;
+      expect(['A', 'B', 'C', 'D'].map((letter) => select(letter).value)).toEqual([
+        'mic',
+        'chat',
+        'music',
+        'system',
+      ]);
+      expect(faders.getByText('100%')).toBeTruthy();
+      expect(faders.getByText('50%')).toBeTruthy();
+      expect(faders.getByText('0%')).toBeTruthy();
+      expect(faders.getByText('20%')).toBeTruthy();
+
+      await fireEvent.change(select('B'), { target: { value: 'game' } });
+      expect(feed.sent.at(-1)).toEqual({ type: 'assignFader', fader: 'b', channel: 'game' });
+    });
+  });
+
+  describe('coming from the Mixer', () => {
+    it('opens the case of a pad that was clicked', async () => {
+      render(App);
+      await report(snapshot());
+      await fireEvent.click(screen.getByRole('button', { name: 'Set Top left in Controls' }));
+      expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Controls');
+      expect(cell('Pad top left').getAttribute('aria-pressed')).toBe('true');
+      expect(screen.getByRole('region', { name: 'Pad top left' })).toBeTruthy();
+    });
+
+    it('opens the mute button of a fader, and a bank', async () => {
+      render(App);
+      await report(snapshot());
+      await fireEvent.click(
+        screen.getByRole('button', { name: 'Set the mute button of fader B in Controls' }),
+      );
+      expect(cell('Mute B').getAttribute('aria-pressed')).toBe('true');
+
+      await fireEvent.click(screen.getByRole('button', { name: 'Mixer' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Set Bank C in Controls' }));
+      expect(cell('Bank C').getAttribute('aria-pressed')).toBe('true');
+      expect(cell('Mute B').getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('does not keep the case when the screen is opened from the menu later', async () => {
+      render(App);
+      await report(snapshot());
+      await fireEvent.click(screen.getByRole('button', { name: 'Set Top left in Controls' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Mixer' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Controls' }));
+      expect(screen.getByText('Choose a button to set what it does.')).toBeTruthy();
     });
   });
 });

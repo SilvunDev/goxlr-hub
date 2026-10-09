@@ -1,13 +1,28 @@
 <script lang="ts">
   import { sendIntent } from '../backend';
-  import type { Snapshot } from '../device';
+  import type { ButtonId, FaderId, Snapshot } from '../device';
   import { i18n } from '../i18n/index.svelte';
   import FaderStrip from './FaderStrip.svelte';
   import MicMeter from './MicMeter.svelte';
   import MuteButton from './MuteButton.svelte';
   import Pads from './Pads.svelte';
 
-  let { device }: { device: Snapshot | null } = $props();
+  let {
+    device,
+    onopen,
+  }: {
+    device: Snapshot | null;
+    /** Opens the case of a button in the Controls screen. */
+    onopen?: (button: ButtonId) => void;
+  } = $props();
+
+  /** The mute button under each fader. */
+  const FADER_BUTTONS: Record<FaderId, ButtonId> = {
+    a: 'fader1Mute',
+    b: 'fader2Mute',
+    c: 'fader3Mute',
+    d: 'fader4Mute',
+  };
 </script>
 
 <section class="mixer">
@@ -16,12 +31,13 @@
     <div class="board">
       <div class="faders">
         {#each device.faders as view (view.fader)}
-          <FaderStrip {view} />
+          <FaderStrip {view} onopen={onopen && (() => onopen(FADER_BUTTONS[view.fader]))} />
         {/each}
       </div>
       <Pads
         pressed={Array.isArray(device.pressed) ? device.pressed : []}
         lit={Array.isArray(device.touched) ? device.touched : undefined}
+        {onopen}
       />
       <aside>
         <MicMeter levelDb={device.micLevelDb} />

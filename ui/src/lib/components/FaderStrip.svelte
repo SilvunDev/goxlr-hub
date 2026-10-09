@@ -5,7 +5,7 @@
   import { i18n } from '../i18n/index.svelte';
   import MuteButton from './MuteButton.svelte';
 
-  let { view }: { view: FaderView } = $props();
+  let { view, onopen }: { view: FaderView; onopen?: () => void } = $props();
 
   /** Volume steps of the keyboard: about 1% and 10%. */
   const STEP = 3;
@@ -102,6 +102,16 @@
     muted={view.muted}
     ontoggle={(muted) => sendIntent({ type: 'setMuted', channel: view.channel, muted })}
   />
+  {#if onopen}
+    <button
+      type="button"
+      class="open"
+      aria-label={i18n.t.mixer.openControls.replace('{fader}', view.fader.toUpperCase())}
+      onclick={onopen}
+    >
+      {i18n.t.mixer.buttonSettings}
+    </button>
+  {/if}
 </article>
 
 <style>
@@ -186,6 +196,21 @@
     font: inherit;
     font-weight: 600;
     cursor: pointer;
+  }
+
+  .open {
+    padding: 2px 6px;
+    border: 0;
+    background: none;
+    color: var(--legend);
+    font: inherit;
+    font-size: 12px;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .open:hover {
+    color: var(--silkscreen);
   }
 
   /* A muted channel goes grey; its button says it in words. */

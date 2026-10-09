@@ -59,6 +59,18 @@ export type RoutingInputId =
   | 'system'
   | 'samples';
 
+/** The inputs, in the order of the rows of the routing grid. */
+export const ROUTING_INPUTS: readonly RoutingInputId[] = [
+  'mic',
+  'chat',
+  'music',
+  'game',
+  'console',
+  'lineIn',
+  'system',
+  'samples',
+];
+
 export type RoutingOutputId = 'headphones' | 'broadcastMix' | 'chatMic' | 'sampler' | 'lineOut';
 
 /** The outputs, in the order of the columns of the routing grid. */
@@ -232,15 +244,48 @@ export type AudioTarget =
   | { type: 'channel'; channel: ChannelId }
   | { type: 'faderTrack'; fader: FaderId };
 
+/** What a route action does to a cell of the routing grid. `off` cuts it. */
+export type RouteMode = 'off' | 'on' | 'toggle';
+
+export const ROUTE_MODES: readonly RouteMode[] = ['off', 'on', 'toggle'];
+
+export type VolumeMode = 'set' | 'up' | 'down';
+
+export const VOLUME_MODES: readonly VolumeMode[] = ['set', 'up', 'down'];
+
 /** What a gesture does. */
 export type Action =
   | { type: 'mute'; target: AudioTarget; mode: MuteMode }
+  | { type: 'route'; input: RoutingInputId; output: RoutingOutputId; mode: RouteMode }
+  | { type: 'volume'; target: AudioTarget; mode: VolumeMode; percent: number }
+  | { type: 'profile'; kind: ProfileKind; name: string }
   | { type: 'bank'; bank: BankId };
 
 /** What a hold can be: only what lasts as long as the button is down. */
 export function canHold(action: Action): boolean {
-  return action.type === 'mute';
+  return action.type === 'mute' || action.type === 'route';
 }
+
+export type WheelId = 'pitch' | 'gender' | 'reverb' | 'echo';
+
+/** The four dials, left to right. */
+export const WHEELS: readonly WheelId[] = ['pitch', 'gender', 'reverb', 'echo'];
+
+/** What a dial does when it is turned. */
+export interface WheelAction {
+  type: 'volume';
+  target: AudioTarget;
+  /** Percent of the whole range, for each notch. */
+  step: number;
+}
+
+export interface WheelView {
+  wheel: WheelId;
+  action: WheelAction | null;
+}
+
+/** How far a notch of a dial moves a volume, in percent. */
+export const WHEEL_STEP = { min: 1, max: 10, step: 1, start: 4 };
 
 /** The 24 buttons of the GoXLR, in the order of the device. */
 export const BUTTONS = [
@@ -284,6 +329,8 @@ export interface ControlsView {
   doublePressMs: number;
   /** Every button, in the order of the device. */
   buttons: ButtonView[];
+  /** Every dial, in the order of the device. */
+  wheels?: WheelView[];
 }
 
 /** How long a press must last to be long, and how long a second press is waited for. */
@@ -295,7 +342,9 @@ export type Intent =
   | { type: 'setGesture'; button: ButtonId; gesture: GestureId; action: Action | null }
   | { type: 'resetControls'; button: ButtonId | null }
   | { type: 'setPressTimes'; longPressMs: number; doublePressMs: number }
+  | { type: 'setWheel'; wheel: WheelId; action: WheelAction | null }
   | { type: 'pressButton'; button: ButtonId; down: boolean }
+  | { type: 'turnWheel'; wheel: WheelId; notches: number }
   | { type: 'resetMic'; block: MicBlockId }
   | { type: 'setMicType'; micType: MicTypeId }
   | { type: 'setMicGain'; gain: number }

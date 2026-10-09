@@ -1,9 +1,17 @@
 <script lang="ts">
-  import { PAD_BANKS, PAD_CLEAR, PADS, type PadId } from '../device';
+  import { PAD_BANKS, PAD_CLEAR, PADS, type ButtonId, type PadId } from '../device';
   import { i18n } from '../i18n/index.svelte';
 
-  let { pressed, lit = pressed }: { pressed: readonly string[]; lit?: readonly string[] } =
-    $props();
+  let {
+    pressed,
+    lit = pressed,
+    onopen,
+  }: {
+    pressed: readonly string[];
+    lit?: readonly string[];
+    /** Opens the case of a pad in the Controls screen. */
+    onopen?: (button: ButtonId) => void;
+  } = $props();
 
   /** What a screen reader says of a pad: its name, then whether it is held. */
   function said(pad: PadId, down: boolean): string {
@@ -12,12 +20,23 @@
   }
 </script>
 
-<!-- Shows what the device says, nothing to click: a list, not buttons. -->
+<!-- Shows what the device says; a click on a pad opens its case in Controls. -->
 {#snippet cell(pad: PadId, shape: string)}
   {@const down = pressed.includes(pad)}
   <!-- Lit while held and for a moment after, so that a quick press is seen. -->
   <li class={shape} class:down={lit.includes(pad)} aria-label={said(pad, down)}>
-    <span aria-hidden="true">{i18n.t.pads.names[pad]}</span>
+    {#if onopen}
+      <button
+        type="button"
+        class="open"
+        aria-label={i18n.t.pads.open.replace('{pad}', i18n.t.pads.names[pad])}
+        onclick={() => onopen(pad)}
+      >
+        {i18n.t.pads.names[pad]}
+      </button>
+    {:else}
+      <span aria-hidden="true">{i18n.t.pads.names[pad]}</span>
+    {/if}
   </li>
 {/snippet}
 
@@ -77,6 +96,21 @@
 
   .pad {
     aspect-ratio: 1;
+  }
+
+  /* The whole cell is the click target. */
+  .open {
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    line-height: inherit;
+    cursor: pointer;
   }
 
   .small {
