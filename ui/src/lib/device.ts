@@ -161,9 +161,9 @@ export interface MicView {
 export type MicBlockId = 'gate' | 'compressor' | 'equalizer' | 'deEsser' | 'all';
 
 /** What can be saved under a name: a profile, or one of the pieces it is made of. */
-export type ProfileKind = 'profile' | 'mix' | 'mic';
+export type ProfileKind = 'profile' | 'mix' | 'mic' | 'controls';
 
-export const PROFILE_KINDS: readonly ProfileKind[] = ['profile', 'mix', 'mic'];
+export const PROFILE_KINDS: readonly ProfileKind[] = ['profile', 'mix', 'mic', 'controls'];
 
 export interface ProfilesView {
   /** The names of what is in use. */
@@ -171,6 +171,7 @@ export interface ProfilesView {
   profiles: string[];
   mixes: string[];
   mics: string[];
+  controls: string[];
   /** What differs from what is saved. `profile`: it is made of other pieces. */
   dirty: Record<ProfileKind, boolean>;
   /** Something was changed and not saved. */
@@ -213,8 +214,88 @@ export const PAD_CLEAR = 'samplerClear';
 
 export type PadId = (typeof PAD_BANKS)[number] | (typeof PADS)[number] | typeof PAD_CLEAR;
 
+export type GestureId = 'short' | 'long' | 'double' | 'hold';
+
+export const GESTURES: readonly GestureId[] = ['short', 'long', 'double', 'hold'];
+
+export type BankId = 'a' | 'b' | 'c';
+
+export const BANKS: readonly BankId[] = ['a', 'b', 'c'];
+
+export type MuteMode = 'mute' | 'unmute' | 'toggle';
+
+export const MUTE_MODES: readonly MuteMode[] = ['mute', 'unmute', 'toggle'];
+
+/** What a mute action silences. */
+export type AudioTarget =
+  | { type: 'mic' }
+  | { type: 'channel'; channel: ChannelId }
+  | { type: 'faderTrack'; fader: FaderId };
+
+/** What a gesture does. */
+export type Action =
+  | { type: 'mute'; target: AudioTarget; mode: MuteMode }
+  | { type: 'bank'; bank: BankId };
+
+/** What a hold can be: only what lasts as long as the button is down. */
+export function canHold(action: Action): boolean {
+  return action.type === 'mute';
+}
+
+/** The 24 buttons of the GoXLR, in the order of the device. */
+export const BUTTONS = [
+  'effectSelect1',
+  'effectSelect5',
+  'samplerSelectA',
+  'samplerTopLeft',
+  'fader1Mute',
+  'effectSelect2',
+  'effectSelect6',
+  'samplerSelectB',
+  'samplerTopRight',
+  'fader2Mute',
+  'effectSelect3',
+  'effectRobot',
+  'samplerSelectC',
+  'samplerBottomRight',
+  'fader3Mute',
+  'effectSelect4',
+  'effectHardTune',
+  'samplerBottomLeft',
+  'samplerClear',
+  'fader4Mute',
+  'effectMegaphone',
+  'effectFx',
+  'bleep',
+  'micMute',
+] as const;
+
+export type ButtonId = (typeof BUTTONS)[number];
+
+/** What a button does, by gesture. A button with a hold has no other gesture. */
+export interface ButtonView extends Record<GestureId, Action | null> {
+  button: ButtonId;
+}
+
+export interface ControlsView {
+  /** How long a press lasts to be a long one, in milliseconds. */
+  longPressMs: number;
+  /** How long a second press is waited for, in milliseconds. */
+  doublePressMs: number;
+  /** Every button, in the order of the device. */
+  buttons: ButtonView[];
+}
+
+/** How long a press must last to be long, and how long a second press is waited for. */
+export const LONG_PRESS_MS = { min: 200, max: 2000, step: 50 };
+export const DOUBLE_PRESS_MS = { min: 150, max: 1000, step: 25 };
+
 /** What the interface asks of the device. The answer is the next snapshot. */
 export type Intent =
+  | { type: 'setGesture'; button: ButtonId; gesture: GestureId; action: Action | null }
+  | { type: 'resetControls'; button: ButtonId | null }
+  | { type: 'setPressTimes'; longPressMs: number; doublePressMs: number }
+  | { type: 'pressButton'; button: ButtonId; down: boolean }
   | { type: 'resetMic'; block: MicBlockId }
   | { type: 'setMicType'; micType: MicTypeId }
   | { type: 'setMicGain'; gain: number }
@@ -262,6 +343,14 @@ export interface Snapshot {
   mic: MicView;
   /** What is saved, what is in use and what changed since. */
   profiles?: ProfilesView;
+  /** What each button does. */
+  controls?: ControlsView;
+  /** Buttons held down, or let go a moment ago. */
+  touched?: string[];
+  /** The button pressed last. `count` changes at every press. */
+  lastPress?: { button: string; count: number } | null;
+  /** The bank the pads are on. */
+  bank?: BankId;
 }
 
 /** The profiles of a snapshot, or nothing when the Rust side did not tell them. */
@@ -274,7 +363,14 @@ export function profilesOf(snapshot: Snapshot): ProfilesView | null {
     [profiles.profiles, profiles.mixes, profiles.mics].every(Array.isArray) &&
     typeof profiles.active.profile === 'string' &&
     profiles.active.profile !== '';
-  return told ? profiles : null;
+  if (!told) return null;
+  // A state that does not know the controls yet has none.
+  return {
+    ...profiles,
+    controls: Array.isArray(profiles.controls) ? profiles.controls : [],
+    active: { ...profiles.active, controls: profiles.active.controls ?? '' },
+    dirty: { ...profiles.dirty, controls: profiles.dirty.controls ?? false },
+  };
 }
 
 /** A volume as a whole percentage. */

@@ -3,10 +3,15 @@
 //! receives a [`Snapshot`].
 
 pub mod backup;
+mod controls;
+mod gestures;
 mod library;
 mod mic;
 mod station;
 mod studio;
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use goxlr_hub_device::{Device, DeviceError, DeviceKind};
 use goxlr_hub_protocol::{
@@ -15,6 +20,12 @@ use goxlr_hub_protocol::{
 };
 use serde::{Deserialize, Serialize};
 
+pub use controls::{
+    Action, AudioTarget, Bank, ButtonActions, ButtonView, Controls, ControlsView, DOUBLE_PRESS_MS,
+    LONG_PRESS_MS, MuteMode,
+};
+pub use gestures::{Clock, Gesture, SystemClock};
+use gestures::{Event, Recognizer};
 pub use library::{Assembly, FORMAT, Kind, Library, MixPiece, ProfileError, valid_name};
 pub use mic::{
     Compressor, CompressorSetting, EqBandView, EqPoint, Gate, GateSetting, MAX_GAIN_DB, MicBlock,
@@ -23,20 +34,20 @@ pub use mic::{
 pub use station::{Connection, ConnectionView, Port, Station};
 pub use studio::{ActiveView, Dirty, ProfileCommand, ProfilesView, Studio};
 
-/// The mute button under each fader, left to right.
-const MUTE_BUTTONS: [Button; Fader::COUNT] = [
-    Button::Fader1Mute,
-    Button::Fader2Mute,
-    Button::Fader3Mute,
-    Button::Fader4Mute,
-];
-
 /// A motorised fader is considered arrived this close to where it was sent.
 const FADER_TOLERANCE: u8 = 5;
 
 /// Readings a travelling fader is given before it is believed again: about
 /// a second.
 const FADER_TRAVEL_READINGS: u8 = 20;
+
+/// A button stays lit on screen this long after it was let go, so that a
+/// quick press can be seen.
+const AFTERGLOW: Duration = Duration::from_millis(600);
+
+/// Counts every press of a button, in the whole app, so that two presses of
+/// the same button are two for whoever looks, whichever device saw them.
+static PRESSES: AtomicU32 = AtomicU32::new(0);
 
 /// The routing of a device the app meets: everything is heard in the
 /// headphones, on the stream and on the line output, the microphone goes to
@@ -75,6 +86,9 @@ pub struct MixerState {
     pub mic_off: bool,
     /// The outputs each input is sent to, in `RoutingInput::ALL` order.
     pub routing: [OutputSet; RoutingInput::COUNT],
+    /// The bank the pads are on. Like the mutes, it is of the moment and no
+    /// profile keeps it.
+    pub bank: Bank,
 }
 
 impl MixerState {
@@ -108,6 +122,7 @@ impl MixerState {
             muted: [false; Channel::COUNT],
             mic_off: false,
             routing: default_routing(),
+            bank: Bank::default(),
         }
     }
 
@@ -126,6 +141,7 @@ impl MixerState {
 pub struct Settings {
     pub mixer: MixerState,
     pub mic: MicState,
+    pub controls: Controls,
 }
 
 impl Settings {
@@ -134,6 +150,7 @@ impl Settings {
         Self {
             mixer: MixerState::unknown(),
             mic: MicState::unknown(),
+            controls: Controls::default(),
         }
     }
 }
@@ -202,6 +219,30 @@ pub enum Intent {
     ResetMic {
         block: MicBlock,
     },
+    /// Gives a gesture of a button an action, or none. A hold takes the
+    /// other gestures of the button away, and they take the hold away.
+    SetGesture {
+        button: Button,
+        gesture: Gesture,
+        action: Option<Action>,
+    },
+    /// Puts a button, or every button and the times of a press, back to what
+    /// they are when nobody chose.
+    ResetControls {
+        button: Option<Button>,
+    },
+    /// How long a press lasts to be long, and how long a second press is
+    /// waited for, in milliseconds.
+    SetPressTimes {
+        long_press_ms: u16,
+        double_press_ms: u16,
+    },
+    /// Presses or releases a button of the virtual device, as a mouse click
+    /// would. The real device has real fingers.
+    PressButton {
+        button: Button,
+        down: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -225,6 +266,22 @@ pub struct Snapshot {
     /// What is saved, what is in use and what changed since. Filled in by
     /// the [`Studio`].
     pub profiles: ProfilesView,
+    /// What each button does.
+    pub controls: ControlsView,
+    /// Buttons held down, or let go a moment ago.
+    pub touched: Vec<Button>,
+    /// The button pressed last, and how many presses there were.
+    pub last_press: Option<LastPress>,
+    /// The bank the pads are on.
+    pub bank: Bank,
+}
+
+/// A button went down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LastPress {
+    pub button: Button,
+    /// Changes at every press, of any button.
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -269,14 +326,38 @@ struct Travel {
     readings_left: u8,
 }
 
+/// What a mute action acts on, once the fader it names is looked up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Silenced {
+    Mic,
+    Channel(Channel),
+}
+
+/// A hold that began: what it acts on. Kept as it was found, so that a
+/// profile loaded meanwhile changes nothing of it.
+struct Hold {
+    button: Button,
+    targets: Vec<Silenced>,
+}
+
 /// The app's side of one connected device.
 pub struct Hub {
     device: Box<dyn Device>,
     mixer: MixerState,
     mic: MicState,
+    controls: Controls,
     travels: [Option<Travel>; Fader::COUNT],
     /// The buttons held at the last reading, to tell a press from a hold.
     held: Option<ButtonSet>,
+    clock: Box<dyn Clock>,
+    recognizer: Recognizer,
+    holds: Vec<Hold>,
+    /// What each target of a hold was before the first hold on it, and
+    /// whether it was silenced: put back when the last hold on it ends.
+    before_holds: Vec<(Silenced, bool)>,
+    /// When each button was last seen down.
+    last_down: [Option<Duration>; Button::ALL.len()],
+    last_press: Option<LastPress>,
 }
 
 impl Hub {
@@ -287,6 +368,7 @@ impl Hub {
             Settings {
                 mixer: MixerState::default(),
                 mic: MicState::default(),
+                controls: Controls::default(),
             },
         )
     }
@@ -315,8 +397,15 @@ impl Hub {
             device,
             mixer: settings.mixer,
             mic: settings.mic,
+            controls: settings.controls,
             travels: [None; Fader::COUNT],
             held: None,
+            clock: Box::new(SystemClock::default()),
+            recognizer: Recognizer::default(),
+            holds: Vec::new(),
+            before_holds: Vec::new(),
+            last_down: [None; Button::ALL.len()],
+            last_press: None,
         };
         hub.send_all()?;
         Ok(hub)
@@ -326,6 +415,7 @@ impl Hub {
     pub fn load(&mut self, settings: Settings) -> Result<(), DeviceError> {
         self.mixer = settings.mixer;
         self.mic = settings.mic;
+        self.controls = settings.controls;
         self.travels = [None; Fader::COUNT];
         self.send_all()
     }
@@ -363,12 +453,34 @@ impl Hub {
         &self.mic
     }
 
+    pub fn controls(&self) -> &Controls {
+        &self.controls
+    }
+
     /// What to send the device again, should it drop and come back.
     pub fn settings(&self) -> Settings {
         Settings {
             mixer: self.mixer.clone(),
             mic: self.mic.clone(),
+            controls: self.controls.clone(),
         }
+    }
+
+    /// Puts back what the buttons held down have changed, without a word to
+    /// the device: for when it is let go, or gone, and no finger will ever
+    /// come up.
+    pub fn release_holds(&mut self) {
+        self.holds.clear();
+        for (target, silenced) in std::mem::take(&mut self.before_holds) {
+            self.set_silenced(target, silenced);
+        }
+    }
+
+    /// Forgets the presses the device showed before: for when it was out of
+    /// sight, and a button seen down then may be up now.
+    pub fn forget_presses(&mut self) {
+        self.recognizer = Recognizer::default();
+        self.held = None;
     }
 
     /// Does what the interface asked, on the device first.
@@ -401,6 +513,31 @@ impl Hub {
                 .set_eq_band(self.device.as_mut(), band, frequency, gain),
             Intent::SetDeEsser { amount } => self.mic.set_de_esser(self.device.as_mut(), amount),
             Intent::ResetMic { block } => self.mic.reset(self.device.as_mut(), block),
+            Intent::SetGesture {
+                button,
+                gesture,
+                action,
+            } => {
+                self.controls.set(button, gesture, action);
+                self.send_lights()
+            }
+            Intent::ResetControls { button } => {
+                match button {
+                    Some(button) => self.controls.reset_button(button),
+                    None => self.controls.reset(),
+                }
+                self.send_lights()
+            }
+            Intent::SetPressTimes {
+                long_press_ms,
+                double_press_ms,
+            } => {
+                self.controls.set_times(long_press_ms, double_press_ms);
+                Ok(())
+            }
+            // Only the virtual device can be pressed from the screen, and the
+            // station does it.
+            Intent::PressButton { .. } => Ok(()),
         }
     }
 
@@ -487,17 +624,66 @@ impl Hub {
         self.send_lights()
     }
 
-    /// A mute button is lit when the channel of its fader is muted.
-    fn lights(&self) -> ButtonLights {
-        let muted = |channel: Channel| self.mixer.muted[usize::from(channel.index())];
-        let mut lights = ButtonLights::default();
-        for (button, channel) in MUTE_BUTTONS.into_iter().zip(self.mixer.faders) {
-            if muted(channel) {
-                lights.set(button, ButtonLight::Lit);
+    /// What a mute action acts on, with the fader it names looked up.
+    fn silenced_by(&self, target: AudioTarget) -> Silenced {
+        match target {
+            AudioTarget::Mic => Silenced::Mic,
+            AudioTarget::Channel { channel } => Silenced::Channel(channel),
+            AudioTarget::FaderTrack { fader } => {
+                Silenced::Channel(self.mixer.faders[usize::from(fader.index())])
             }
         }
-        if self.mixer.mic_off {
-            lights.set(Button::MicMute, ButtonLight::Lit);
+    }
+
+    fn is_silenced(&self, target: Silenced) -> bool {
+        match target {
+            Silenced::Mic => self.mixer.mic_off,
+            Silenced::Channel(channel) => self.mixer.muted[usize::from(channel.index())],
+        }
+    }
+
+    /// Writes what is silenced in the mixer only, without a word to the device.
+    fn set_silenced(&mut self, target: Silenced, silenced: bool) {
+        match target {
+            Silenced::Mic => self.mixer.mic_off = silenced,
+            Silenced::Channel(channel) => {
+                self.mixer.muted[usize::from(channel.index())] = silenced;
+            }
+        }
+    }
+
+    fn silence(&mut self, target: Silenced, silenced: bool) -> Result<(), DeviceError> {
+        match target {
+            Silenced::Mic => self.set_mic_off(silenced),
+            Silenced::Channel(channel) => self.set_muted(channel, silenced),
+        }
+    }
+
+    /// Whether what an action does is in force: a track silenced for an
+    /// action that silences it, open for one that opens it, the bank the
+    /// action switches to.
+    fn in_force(&self, action: Action) -> bool {
+        match action {
+            Action::Mute { target, mode } => {
+                let silenced = self.is_silenced(self.silenced_by(target));
+                silenced != (mode == MuteMode::Unmute)
+            }
+            Action::Bank { bank } => self.mixer.bank == bank,
+        }
+    }
+
+    /// A button is lit when what one of its actions does is in force.
+    fn lights(&self) -> ButtonLights {
+        let mut lights = ButtonLights::default();
+        for button in Button::ALL {
+            if self
+                .controls
+                .actions(button)
+                .all()
+                .any(|action| self.in_force(action))
+            {
+                lights.set(button, ButtonLight::Lit);
+            }
         }
         lights
     }
@@ -506,21 +692,125 @@ impl Hub {
         self.device.set_button_lights(self.lights())
     }
 
-    /// Does what the mute buttons that went down since the last reading
-    /// are for.
-    fn follow_buttons(&mut self, pressed: ButtonSet) -> Result<(), DeviceError> {
-        // Buttons already down when the device is taken over are no press.
-        let held = self.held.replace(pressed).unwrap_or(pressed);
-        let went_down = |button: Button| pressed.contains(button) && !held.contains(button);
-
-        for (button, channel) in MUTE_BUTTONS.into_iter().zip(self.mixer.faders) {
-            if went_down(button) {
-                let muted = self.mixer.muted[usize::from(channel.index())];
-                self.set_muted(channel, !muted)?;
+    /// Does what an action says.
+    fn fire(&mut self, action: Action) -> Result<(), DeviceError> {
+        match action {
+            Action::Mute { target, mode } => {
+                let target = self.silenced_by(target);
+                let silenced = self.is_silenced(target);
+                let wanted = match mode {
+                    MuteMode::Mute => true,
+                    MuteMode::Unmute => false,
+                    MuteMode::Toggle => !silenced,
+                };
+                if wanted == silenced {
+                    return Ok(());
+                }
+                self.silence(target, wanted)
+            }
+            Action::Bank { bank } => {
+                self.mixer.bank = bank;
+                self.send_lights()
             }
         }
-        if went_down(Button::MicMute) {
-            self.set_mic_off(!self.mixer.mic_off)?;
+    }
+
+    /// Begins a hold: does what the action says, and notes what to put back.
+    /// Another hold on the same target finds it already held: what it was
+    /// before the first one is what comes back.
+    fn begin_hold(&mut self, button: Button, action: Action) -> Result<(), DeviceError> {
+        let mut targets = Vec::new();
+        if let Action::Mute { target, .. } = action {
+            let target = self.silenced_by(target);
+            if !self.before_holds.iter().any(|(held, _)| *held == target) {
+                self.before_holds.push((target, self.is_silenced(target)));
+            }
+            targets.push(target);
+        }
+        self.holds.push(Hold { button, targets });
+        self.fire(action)
+    }
+
+    /// Ends a hold. What it acted on goes back to what it was before, once no
+    /// other hold acts on it. The mixer says so even when the device does
+    /// not answer, so that nothing stays silenced for a finger long gone.
+    fn end_hold(&mut self, button: Button) -> Result<(), DeviceError> {
+        let Some(at) = self.holds.iter().position(|hold| hold.button == button) else {
+            return Ok(());
+        };
+        let ended = self.holds.remove(at);
+        let mut sent = Ok(());
+        for target in ended.targets {
+            if self.holds.iter().any(|hold| hold.targets.contains(&target)) {
+                continue;
+            }
+            let Some(at) = self
+                .before_holds
+                .iter()
+                .position(|(held, _)| *held == target)
+            else {
+                continue;
+            };
+            let (_, silenced) = self.before_holds.remove(at);
+            if self.is_silenced(target) != silenced {
+                self.set_silenced(target, silenced);
+                if sent.is_ok() {
+                    sent = self.send_silenced(target);
+                }
+            }
+        }
+        sent
+    }
+
+    /// Tells the device what the mixer says of a target.
+    fn send_silenced(&mut self, target: Silenced) -> Result<(), DeviceError> {
+        match target {
+            Silenced::Mic | Silenced::Channel(Channel::Mic) => {
+                self.send_mic(self.mixer.mic_silenced())?;
+            }
+            Silenced::Channel(channel) => {
+                let muted = self.mixer.muted[usize::from(channel.index())];
+                self.device.set_muted(channel, muted)?;
+            }
+        }
+        self.send_lights()
+    }
+
+    /// Notes which buttons went down, and does what the gestures that are
+    /// over are for.
+    fn follow_buttons(&mut self, pressed: ButtonSet, now: Duration) -> Result<(), DeviceError> {
+        // Buttons already down when the device is taken over are no press.
+        let held = self.held.replace(pressed).unwrap_or(pressed);
+        for button in pressed.iter() {
+            self.last_down[usize::from(button.bit())] = Some(now);
+            if !held.contains(button) {
+                self.last_press = Some(LastPress {
+                    button,
+                    count: PRESSES.fetch_add(1, Ordering::Relaxed) + 1,
+                });
+            }
+        }
+
+        let events = self.recognizer.update(
+            now,
+            pressed,
+            |button| self.controls.wanted(button),
+            self.controls.timing(),
+        );
+        for (button, event) in events {
+            match event {
+                Event::Fire(gesture) => {
+                    if let Some(action) = self.controls.action(button, gesture) {
+                        self.fire(action)?;
+                    }
+                }
+                Event::HoldStart => {
+                    if let Some(action) = self.controls.action(button, Gesture::Hold) {
+                        self.begin_hold(button, action)?;
+                    }
+                }
+                Event::HoldEnd => self.end_hold(button)?,
+            }
         }
         Ok(())
     }
@@ -547,7 +837,8 @@ impl Hub {
             self.mixer.volumes[usize::from(channel.index())] = Some(position);
         }
 
-        self.follow_buttons(status.pressed)?;
+        let now = self.clock.now();
+        self.follow_buttons(status.pressed, now)?;
 
         let volume = |channel: Channel| self.mixer.volumes[usize::from(channel.index())];
         let muted = |channel: Channel| self.mixer.muted[usize::from(channel.index())];
@@ -604,9 +895,23 @@ impl Hub {
             mic_level_db: mic_level_db(mic_level),
             mic: self.mic.view(),
             profiles: ProfilesView::default(),
+            controls: self.controls.view(),
+            touched: Button::ALL
+                .into_iter()
+                .filter(|button| {
+                    status.pressed.contains(*button)
+                        || self.last_down[usize::from(button.bit())]
+                            .is_some_and(|seen| now.saturating_sub(seen) < AFTERGLOW)
+                })
+                .collect(),
+            last_press: self.last_press,
+            bank: self.mixer.bank,
         })
     }
 }
+
+#[cfg(test)]
+mod controls_tests;
 
 #[cfg(test)]
 mod tests {
@@ -615,6 +920,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// What the buttons show when nothing is muted: the pads are on bank A.
+    pub(crate) fn resting_lights() -> ButtonLights {
+        let mut lights = ButtonLights::default();
+        lights.set(Button::SamplerSelectA, ButtonLight::Lit);
+        lights
+    }
 
     fn hub() -> (Hub, goxlr_hub_device::VirtualHandle) {
         let (device, hands) = open_virtual().unwrap();
@@ -792,14 +1104,14 @@ mod tests {
         let device = hands.state();
         assert!(device.muted[at(Channel::Chat)] && device.muted[at(Channel::Game)]);
         // Chat is under fader B; Game is under no fader, so has no light.
-        let mut lights = ButtonLights::default();
+        let mut lights = resting_lights();
         lights.set(Button::Fader2Mute, ButtonLight::Lit);
         assert_eq!(device.lights, lights);
         assert!(hub.poll().unwrap().faders[1].muted);
 
         hub.apply(mute(Channel::Chat, false)).unwrap();
         assert!(!hands.state().muted[at(Channel::Chat)]);
-        assert_eq!(hands.state().lights, ButtonLights::default());
+        assert_eq!(hands.state().lights, resting_lights());
     }
 
     #[test]
@@ -855,7 +1167,7 @@ mod tests {
         assert!(!hub.poll().unwrap().mic_off);
         let device = hands.state();
         assert!(!device.mic_input_muted && !device.muted[at(Channel::Mic)]);
-        assert_eq!(device.lights, ButtonLights::default());
+        assert_eq!(device.lights, resting_lights());
     }
 
     #[test]

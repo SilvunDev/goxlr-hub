@@ -9,8 +9,9 @@ use goxlr_hub_protocol::{Channel, Fader, OutputSet, RoutingInput, RoutingOutput}
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::controls::ControlsFile;
 use crate::mic::MicFile;
-use crate::{FADER_TOLERANCE, MicState, MixerState, can_route, default_routing};
+use crate::{Controls, FADER_TOLERANCE, MicState, MixerState, can_route, default_routing};
 
 /// The piece every profile starts with.
 const FIRST_NAME: &str = "Default";
@@ -37,16 +38,19 @@ pub enum Kind {
     Mix,
     /// The microphone and its processing.
     Mic,
+    /// What each button does.
+    Controls,
 }
 
 impl Kind {
-    const ALL: [Self; 3] = [Self::Profile, Self::Mix, Self::Mic];
+    const ALL: [Self; 4] = [Self::Profile, Self::Mix, Self::Mic, Self::Controls];
 
     fn folder(self) -> &'static str {
         match self {
             Self::Profile => "profiles",
             Self::Mix => "mixes",
             Self::Mic => "mics",
+            Self::Controls => "controls",
         }
     }
 }
@@ -75,7 +79,6 @@ pub enum ProfileError {
 pub struct Assembly {
     pub mix: String,
     pub mic: String,
-    /// Nothing to keep yet.
     #[serde(default = "first_name")]
     pub controls: String,
     /// Nothing to keep yet.
@@ -93,6 +96,7 @@ impl Assembly {
             Kind::Profile => None,
             Kind::Mix => Some(&self.mix),
             Kind::Mic => Some(&self.mic),
+            Kind::Controls => Some(&self.controls),
         }
     }
 
@@ -101,6 +105,7 @@ impl Assembly {
             Kind::Profile => None,
             Kind::Mix => Some(&mut self.mix),
             Kind::Mic => Some(&mut self.mic),
+            Kind::Controls => Some(&mut self.controls),
         }
     }
 }
@@ -271,7 +276,7 @@ pub struct Library {
     root: PathBuf,
     /// The names on disk, in `Kind::ALL` order. Read once: listing folders
     /// many times a second would be too much.
-    names: [Vec<String>; 3],
+    names: [Vec<String>; 4],
 }
 
 impl Library {
@@ -426,6 +431,15 @@ impl Library {
         self.write(Kind::Mic, name, &mic.to_file())
     }
 
+    pub fn read_controls(&self, name: &str) -> Result<Controls, ProfileError> {
+        self.read::<ControlsFile>(Kind::Controls, name)
+            .map(Controls::from_file)
+    }
+
+    pub fn write_controls(&mut self, name: &str, controls: &Controls) -> Result<(), ProfileError> {
+        self.write(Kind::Controls, name, &controls.to_file())
+    }
+
     /// The profiles made of a piece.
     fn users(&self, kind: Kind, name: &str) -> Vec<(String, Assembly)> {
         self.names(Kind::Profile)
@@ -507,18 +521,17 @@ impl Library {
             .map_err(|_| ProfileError::Storage)
     }
 
-    /// Controls and lighting have nothing to keep yet. Their files are there
-    /// so that the format does not change when they do.
+    /// Lighting has nothing to keep yet. Its file is there so that the format
+    /// does not change when it does.
     pub fn write_empty_pieces(&self) -> Result<(), ProfileError> {
-        for folder in ["controls", "lighting"] {
-            let path = self.root.join(folder).join(format!("{FIRST_NAME}.toml"));
-            if !path.exists() {
-                fs::create_dir_all(self.root.join(folder))
-                    .and_then(|()| fs::write(path, "# Nothing to keep yet.\n"))
-                    .map_err(|_| ProfileError::Storage)?;
-            }
+        let folder = self.root.join("lighting");
+        let path = folder.join(format!("{FIRST_NAME}.toml"));
+        if path.exists() {
+            return Ok(());
         }
-        Ok(())
+        fs::create_dir_all(folder)
+            .and_then(|()| fs::write(path, "# Nothing to keep yet.\n"))
+            .map_err(|_| ProfileError::Storage)
     }
 
     /// A profile of its own pieces, named after it, all free names.
@@ -526,7 +539,7 @@ impl Library {
         Assembly {
             mix: self.free_name(Kind::Mix, profile),
             mic: self.free_name(Kind::Mic, profile),
-            controls: first_name(),
+            controls: self.free_name(Kind::Controls, profile),
             lighting: first_name(),
         }
     }
@@ -541,9 +554,10 @@ impl Library {
 pub(crate) mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use goxlr_hub_protocol::MicType;
+    use goxlr_hub_protocol::{Button, MicType};
 
     use super::*;
+    use crate::{Action, AudioTarget, Gesture, MuteMode};
 
     /// A folder of its own for a test, emptied when the test ends.
     pub(crate) struct Folder(pub PathBuf);
@@ -1122,5 +1136,141 @@ shape = \"unheard of\"
         // It can still be put aside or removed by who knows what it is.
         assert_eq!(library.delete(Kind::Profile, "Later"), Ok(()));
         assert_eq!(library.delete(Kind::Mix, "Stream"), Ok(()));
+    }
+
+    fn a_controls() -> Controls {
+        let mut controls = Controls::default();
+        controls.set(
+            Button::SamplerTopLeft,
+            Gesture::Long,
+            Some(Action::Mute {
+                target: AudioTarget::Channel {
+                    channel: Channel::Music,
+                },
+                mode: MuteMode::Mute,
+            }),
+        );
+        controls.set(
+            Button::MicMute,
+            Gesture::Hold,
+            Some(Action::Mute {
+                target: AudioTarget::Mic,
+                mode: MuteMode::Mute,
+            }),
+        );
+        controls.set_times(650, 400);
+        controls
+    }
+
+    #[test]
+    fn the_controls_of_a_profile_are_written_for_a_human_and_read_back() {
+        let (mut library, folder) = library();
+        library.write_controls("Stream", &a_controls()).unwrap();
+        library
+            .write_controls("Blank", &Controls::default())
+            .unwrap();
+        let text = folder.text("controls/Stream.toml");
+        for expected in [
+            "format = 1",
+            "longPressMs = 650",
+            "doublePressMs = 400",
+            "[buttons.samplerTopLeft",
+            r#"type = "mute""#,
+            r#"mode = "mute""#,
+            r#"channel = "music""#,
+            "[buttons.micMute",
+        ] {
+            assert!(text.contains(expected), "{expected} in {text}");
+        }
+        assert!(!text.contains(".new"));
+
+        let library = Library::open(folder.0.clone());
+        assert_eq!(library.read_controls("Stream"), Ok(a_controls()));
+        assert_eq!(library.read_controls("Blank"), Ok(Controls::default()));
+        assert_eq!(library.names(Kind::Controls), ["Blank", "Stream"]);
+    }
+
+    #[test]
+    fn the_placeholder_of_the_first_versions_reads_as_the_starting_controls() {
+        let folder = Folder::new();
+        folder.put("controls/Default.toml", "# Nothing to keep yet.\n");
+        let library = Library::open(folder.0.clone());
+        assert_eq!(library.read_controls("Default"), Ok(Controls::default()));
+    }
+
+    #[test]
+    fn controls_that_make_no_sense_or_come_from_the_future_are_left_alone() {
+        let folder = Folder::new();
+        folder.put("controls/Torn.toml", "format = 1\n[buttons.mic");
+        folder.put(
+            "controls/Strange.toml",
+            "[buttons.bleep]\nshort = { type = \"teleport\" }\n",
+        );
+        let later = "format = 2\nshape = \"unheard of\"\n";
+        folder.put("controls/Later.toml", later);
+        let mut library = Library::open(folder.0.clone());
+        assert_eq!(library.read_controls("Torn"), Err(ProfileError::Unreadable));
+        assert_eq!(
+            library.read_controls("Strange"),
+            Err(ProfileError::Unreadable)
+        );
+        assert_eq!(library.read_controls("Later"), Err(ProfileError::Newer));
+        assert_eq!(
+            library.write_controls("Later", &a_controls()),
+            Err(ProfileError::Newer)
+        );
+        assert_eq!(folder.text("controls/Later.toml"), later);
+        assert_eq!(
+            library.read_controls("Missing"),
+            Err(ProfileError::NotFound)
+        );
+    }
+
+    #[test]
+    fn controls_follow_their_name_and_stay_while_a_profile_is_made_of_them() {
+        let (mut library, _folder) = library();
+        library.write_controls("Stream", &a_controls()).unwrap();
+        let mut assembly = assembly("Stream", "Stream");
+        assembly.controls = "Stream".into();
+        library.write_mix("Stream", &a_mix()).unwrap();
+        library.write_mic("Stream", &a_mic()).unwrap();
+        library.write_profile("Stream", &assembly).unwrap();
+
+        assert_eq!(
+            library.delete(Kind::Controls, "Stream"),
+            Err(ProfileError::InUse)
+        );
+        assert_eq!(
+            library.rename(Kind::Controls, "Stream", "Desk").as_deref(),
+            Ok("Desk")
+        );
+        assert_eq!(library.read_profile("Stream").unwrap().controls, "Desk");
+        assert_eq!(library.read_controls("Desk"), Ok(a_controls()));
+        assert_eq!(
+            library
+                .duplicate(Kind::Controls, "Desk", "Desk copy")
+                .as_deref(),
+            Ok("Desk copy")
+        );
+        assert_eq!(library.delete(Kind::Controls, "Desk copy"), Ok(()));
+    }
+
+    #[test]
+    fn a_profile_of_its_own_gets_controls_of_its_own() {
+        let (mut library, _folder) = library();
+        library.write_controls("Stream", &a_controls()).unwrap();
+        assert_eq!(library.new_assembly("Stream").controls, "Stream 2");
+        assert_eq!(library.new_assembly("Game").controls, "Game");
+    }
+
+    #[test]
+    fn a_profile_from_before_the_controls_were_kept_still_reads() {
+        let folder = Folder::new();
+        folder.put(
+            "profiles/Old.toml",
+            "format = 1\nmix = \"Old\"\nmic = \"Old\"\ncontrols = \"Default\"\nlighting = \"Default\"\n",
+        );
+        let library = Library::open(folder.0.clone());
+        assert_eq!(library.read_profile("Old").unwrap().controls, "Default");
     }
 }

@@ -7,7 +7,7 @@ use goxlr_hub_device::DeviceError;
 use serde::{Deserialize, Serialize};
 
 use crate::library::{Assembly, Kind, Library, MixPiece, ProfileError};
-use crate::{Connection, Intent, MicState, Port, Settings, Snapshot, Station};
+use crate::{Connection, Controls, Intent, MicState, Port, Settings, Snapshot, Station};
 
 /// What the interface asks of the profiles.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -54,6 +54,7 @@ pub struct ProfilesView {
     pub profiles: Vec<String>,
     pub mixes: Vec<String>,
     pub mics: Vec<String>,
+    pub controls: Vec<String>,
     pub dirty: Dirty,
     /// Something was changed and not saved.
     pub unsaved: bool,
@@ -65,6 +66,7 @@ pub struct ActiveView {
     pub profile: String,
     pub mix: String,
     pub mic: String,
+    pub controls: String,
 }
 
 /// What differs from what is saved.
@@ -72,6 +74,7 @@ pub struct ActiveView {
 pub struct Dirty {
     pub mix: bool,
     pub mic: bool,
+    pub controls: bool,
     /// The profile is made of other pieces than the ones in use.
     pub profile: bool,
 }
@@ -81,6 +84,7 @@ struct Saved {
     assembly: Assembly,
     mix: MixPiece,
     mic: MicState,
+    controls: Controls,
 }
 
 pub struct Studio<P: Port> {
@@ -103,6 +107,7 @@ impl<P: Port> Studio<P> {
         let mut settings = Settings::unknown();
         saved.mix.put(&mut settings.mixer);
         settings.mic = saved.mic.clone();
+        settings.controls = saved.controls.clone();
         Ok(Self {
             station: Station::new(port, settings)?,
             library,
@@ -133,10 +138,12 @@ impl<P: Port> Studio<P> {
             assembly: library.new_assembly(&profile),
             mix: MixPiece::of(&Settings::unknown().mixer),
             mic: MicState::unknown(),
+            controls: Controls::default(),
         };
         let _ = library
             .write_mix(&saved.assembly.mix, &saved.mix)
             .and_then(|()| library.write_mic(&saved.assembly.mic, &saved.mic))
+            .and_then(|()| library.write_controls(&saved.assembly.controls, &saved.controls))
             .and_then(|()| library.write_empty_pieces())
             .and_then(|()| library.write_profile(&profile, &saved.assembly))
             .and_then(|()| library.set_last(&profile));
@@ -148,6 +155,12 @@ impl<P: Port> Studio<P> {
         Ok(Saved {
             mix: library.read_mix(&assembly.mix)?,
             mic: library.read_mic(&assembly.mic)?,
+            // A profile from before the controls were kept names a piece
+            // that may never have been written.
+            controls: match library.read_controls(&assembly.controls) {
+                Err(ProfileError::NotFound) => Controls::default(),
+                controls => controls?,
+            },
             assembly,
         })
     }
@@ -183,6 +196,7 @@ impl<P: Port> Studio<P> {
         Dirty {
             mix: !self.saved.mix.matches(&settings.mixer),
             mic: self.saved.mic != settings.mic,
+            controls: self.saved.controls != settings.controls,
             profile: self.active != self.saved.assembly,
         }
     }
@@ -190,7 +204,7 @@ impl<P: Port> Studio<P> {
     /// Something was changed and not saved.
     pub fn unsaved(&self) -> bool {
         let dirty = self.dirty();
-        dirty.mix || dirty.mic || dirty.profile
+        dirty.mix || dirty.mic || dirty.controls || dirty.profile
     }
 
     fn view(&self) -> ProfilesView {
@@ -199,10 +213,12 @@ impl<P: Port> Studio<P> {
                 profile: self.profile.clone(),
                 mix: self.active.mix.clone(),
                 mic: self.active.mic.clone(),
+                controls: self.active.controls.clone(),
             },
             profiles: self.library.names(Kind::Profile).to_vec(),
             mixes: self.library.names(Kind::Mix).to_vec(),
             mics: self.library.names(Kind::Mic).to_vec(),
+            controls: self.library.names(Kind::Controls).to_vec(),
             dirty: self.dirty(),
             unsaved: self.unsaved(),
         }
@@ -220,12 +236,18 @@ impl<P: Port> Studio<P> {
         }
     }
 
-    /// Brings the device shown to a mix and a microphone. The mutes stay as
-    /// they are.
-    fn load(&mut self, mix: &MixPiece, mic: &MicState) -> Result<(), ProfileError> {
+    /// Brings the device shown to a mix, a microphone and controls. The
+    /// mutes stay as they are.
+    fn load(
+        &mut self,
+        mix: &MixPiece,
+        mic: &MicState,
+        controls: &Controls,
+    ) -> Result<(), ProfileError> {
         let mut settings = self.station.settings().clone();
         mix.put(&mut settings.mixer);
         settings.mic = mic.clone();
+        settings.controls = controls.clone();
         self.station
             .load(settings)
             .map_err(|_| ProfileError::Storage)
@@ -235,7 +257,7 @@ impl<P: Port> Studio<P> {
         match kind {
             Kind::Profile => {
                 let saved = Self::read(&self.library, name)?;
-                self.load(&saved.mix, &saved.mic)?;
+                self.load(&saved.mix, &saved.mic, &saved.controls)?;
                 self.profile = name.into();
                 self.active = saved.assembly.clone();
                 self.saved = saved;
@@ -245,17 +267,29 @@ impl<P: Port> Studio<P> {
             }
             Kind::Mix => {
                 let mix = self.library.read_mix(name)?;
-                let mic = self.station.settings().mic.clone();
-                self.load(&mix, &mic)?;
+                let settings = self.station.settings();
+                let (mic, controls) = (settings.mic.clone(), settings.controls.clone());
+                self.load(&mix, &mic, &controls)?;
                 self.active.mix = name.into();
                 self.saved.mix = mix;
             }
             Kind::Mic => {
                 let mic = self.library.read_mic(name)?;
-                let mix = MixPiece::of(&self.station.settings().mixer);
-                self.load(&mix, &mic)?;
+                let settings = self.station.settings();
+                let mix = MixPiece::of(&settings.mixer);
+                let controls = settings.controls.clone();
+                self.load(&mix, &mic, &controls)?;
                 self.active.mic = name.into();
                 self.saved.mic = mic;
+            }
+            Kind::Controls => {
+                let controls = self.library.read_controls(name)?;
+                let settings = self.station.settings();
+                let mix = MixPiece::of(&settings.mixer);
+                let mic = settings.mic.clone();
+                self.load(&mix, &mic, &controls)?;
+                self.active.controls = name.into();
+                self.saved.controls = controls;
             }
         }
         Ok(())
@@ -277,6 +311,14 @@ impl<P: Port> Studio<P> {
         Ok(())
     }
 
+    fn save_controls(&mut self, name: &str) -> Result<(), ProfileError> {
+        let controls = self.station.settings().controls.clone();
+        self.library.write_controls(name, &controls)?;
+        self.active.controls = name.into();
+        self.saved.controls = controls;
+        Ok(())
+    }
+
     fn save_profile(&mut self, name: &str) -> Result<(), ProfileError> {
         self.library.write_profile(name, &self.active)?;
         self.profile = name.into();
@@ -290,9 +332,11 @@ impl<P: Port> Studio<P> {
         match kind {
             Kind::Mix => self.save_mix(&active.mix),
             Kind::Mic => self.save_mic(&active.mic),
+            Kind::Controls => self.save_controls(&active.controls),
             Kind::Profile => {
                 self.save_mix(&active.mix)?;
                 self.save_mic(&active.mic)?;
+                self.save_controls(&active.controls)?;
                 self.save_profile(&self.profile.clone())
             }
         }
@@ -313,10 +357,12 @@ impl<P: Port> Studio<P> {
         match kind {
             Kind::Mix => self.save_mix(&name),
             Kind::Mic => self.save_mic(&name),
+            Kind::Controls => self.save_controls(&name),
             Kind::Profile => {
                 let pieces = self.library.new_assembly(&name);
                 self.save_mix(&pieces.mix)?;
                 self.save_mic(&pieces.mic)?;
+                self.save_controls(&pieces.controls)?;
                 self.save_profile(&name)
             }
         }
@@ -344,6 +390,13 @@ impl<P: Port> Studio<P> {
                     }
                 }
             }
+            Kind::Controls => {
+                for controls in [&mut self.active.controls, &mut self.saved.assembly.controls] {
+                    if controls == name {
+                        controls.clone_from(&to);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -356,12 +409,20 @@ impl<P: Port> Studio<P> {
         let to = self.free(Kind::Profile, to)?;
         let mut assembly = self.library.read_profile(name)?;
         let pieces = self.library.new_assembly(&to);
+        // The controls first: a piece that was never written is made from the
+        // starting buttons, and a refusal leaves no orphan piece behind.
+        let controls = match self.library.read_controls(&assembly.controls) {
+            Err(ProfileError::NotFound) => Controls::default(),
+            controls => controls?,
+        };
+        self.library.write_controls(&pieces.controls, &controls)?;
         self.library
             .duplicate(Kind::Mix, &assembly.mix, &pieces.mix)?;
         self.library
             .duplicate(Kind::Mic, &assembly.mic, &pieces.mic)?;
         assembly.mix = pieces.mix;
         assembly.mic = pieces.mic;
+        assembly.controls = pieces.controls;
         self.library.write_profile(&to, &assembly)
     }
 
@@ -370,6 +431,7 @@ impl<P: Port> Studio<P> {
             Kind::Profile => self.profile == name,
             Kind::Mix => self.active.mix == name,
             Kind::Mic => self.active.mic == name,
+            Kind::Controls => self.active.controls == name,
         };
         if in_use {
             return Err(ProfileError::InUse);
@@ -384,13 +446,13 @@ mod tests {
 
     use goxlr_hub_device::{Device, OpenError, VirtualHandle, open_virtual};
     use goxlr_hub_protocol::{
-        Channel, EffectKey, Fader, MicType, OutputSet, RoutingInput, RoutingOutput, Side,
+        Button, Channel, EffectKey, Fader, MicType, OutputSet, RoutingInput, RoutingOutput, Side,
     };
     use serde_json::json;
 
     use super::*;
-    use crate::CompressorSetting;
     use crate::library::tests::Folder;
+    use crate::{Action, AudioTarget, CompressorSetting, Gesture, MuteMode};
 
     /// A port with at most one device to open, and none by default.
     #[derive(Default)]
@@ -457,11 +519,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&view).unwrap(),
             json!({
-                "active": { "profile": "Default", "mix": "Default", "mic": "Default" },
+                "active": {
+                    "profile": "Default", "mix": "Default", "mic": "Default", "controls": "Default"
+                },
                 "profiles": ["Default"],
                 "mixes": ["Default"],
                 "mics": ["Default"],
-                "dirty": { "mix": false, "mic": false, "profile": false },
+                "controls": ["Default"],
+                "dirty": { "mix": false, "mic": false, "controls": false, "profile": false },
                 "unsaved": false,
             })
         );
@@ -950,5 +1015,315 @@ mod tests {
             serde_json::to_value(ProfileError::NameTaken).unwrap(),
             json!("nameTaken")
         );
+        assert_eq!(
+            read(json!({ "type": "select", "kind": "controls", "name": "A" })),
+            ProfileCommand::Select {
+                kind: Kind::Controls,
+                name: "A".into()
+            }
+        );
+    }
+
+    const PAD: Button = Button::SamplerTopLeft;
+
+    fn mute_music(mode: MuteMode) -> Action {
+        Action::Mute {
+            target: AudioTarget::Channel {
+                channel: Channel::Music,
+            },
+            mode,
+        }
+    }
+
+    fn give(button: Button, gesture: Gesture, action: Action) -> Intent {
+        Intent::SetGesture {
+            button,
+            gesture,
+            action: Some(action),
+        }
+    }
+
+    /// What a button does for a gesture, as the interface is told.
+    fn does(studio: &mut Studio<Socket>, button: Button, gesture: Gesture) -> Option<Action> {
+        let view = studio.poll().unwrap().controls;
+        let view = view
+            .buttons
+            .into_iter()
+            .find(|view| view.button == button)
+            .unwrap();
+        match gesture {
+            Gesture::Short => view.short,
+            Gesture::Long => view.long,
+            Gesture::Double => view.double,
+            Gesture::Hold => view.hold,
+        }
+    }
+
+    #[test]
+    fn what_the_buttons_do_is_saved_and_comes_back_with_the_profile() {
+        let folder = Folder::new();
+        let mut studio = launch(&folder);
+        assert!(!studio.unsaved());
+
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Toggle)))
+            .unwrap();
+        let view = studio.poll().unwrap().profiles;
+        assert_eq!(
+            (view.dirty.controls, view.dirty.mix, view.dirty.mic),
+            (true, false, false)
+        );
+        assert!(view.unsaved && studio.unsaved());
+
+        // Put back by hand: nothing to save any more.
+        studio
+            .apply(Intent::ResetControls { button: Some(PAD) })
+            .unwrap();
+        assert!(!studio.unsaved());
+
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Toggle)))
+            .unwrap();
+        studio
+            .apply(Intent::SetPressTimes {
+                long_press_ms: 700,
+                double_press_ms: 333,
+            })
+            .unwrap();
+        studio.run(SAVE).unwrap();
+        assert!(!studio.unsaved());
+        let text = folder.text("controls/Default.toml");
+        assert!(text.contains("longPressMs = 700"), "{text}");
+        assert!(text.contains("samplerTopLeft"), "{text}");
+
+        let mut studio = launch(&folder);
+        assert!(!studio.unsaved());
+        assert_eq!(
+            does(&mut studio, PAD, Gesture::Long),
+            Some(mute_music(MuteMode::Toggle))
+        );
+        assert_eq!(studio.poll().unwrap().controls.long_press_ms, 700);
+    }
+
+    #[test]
+    fn a_profile_made_before_the_controls_were_kept_shows_no_banner() {
+        let folder = Folder::new();
+        launch(&folder);
+        // As the first versions left it.
+        folder.put("controls/Default.toml", "# Nothing to keep yet.\n");
+        let mut studio = launch(&folder);
+        assert!(!studio.unsaved());
+        assert!(
+            does(&mut studio, Button::MicMute, Gesture::Short).is_some(),
+            "the buttons do what one expects"
+        );
+        assert_eq!(does(&mut studio, PAD, Gesture::Long), None);
+
+        // Not even a file: the same.
+        std::fs::remove_dir_all(folder.0.join("controls")).unwrap();
+        let mut studio = launch(&folder);
+        assert!(!studio.unsaved());
+        assert!(does(&mut studio, Button::MicMute, Gesture::Short).is_some());
+        // Saving brings the file back.
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Mute)))
+            .unwrap();
+        studio.run(SAVE).unwrap();
+        assert!(
+            folder
+                .text("controls/Default.toml")
+                .contains("samplerTopLeft")
+        );
+    }
+
+    #[test]
+    fn controls_that_cannot_be_read_do_not_stop_the_launch() {
+        let folder = Folder::new();
+        launch(&folder);
+        folder.put("controls/Default.toml", "format = 1\n[buttons.mic");
+        let mut studio = launch(&folder);
+        // The first profile that can be read is another one, made on the spot.
+        let view = studio.poll().unwrap().profiles;
+        assert_eq!(view.active.profile, "Default 2");
+        assert!(!studio.unsaved());
+
+        // A file of a newer format is left as it is.
+        let folder = Folder::new();
+        launch(&folder);
+        let later = "format = 2\nshape = \"later\"\n";
+        folder.put("controls/Default.toml", later);
+        launch(&folder);
+        assert_eq!(folder.text("controls/Default.toml"), later);
+    }
+
+    #[test]
+    fn a_profile_saved_under_a_new_name_gets_controls_of_its_own() {
+        let folder = Folder::new();
+        let mut studio = launch(&folder);
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Mute)))
+            .unwrap();
+        studio.run(save_as(Kind::Profile, "Stream")).unwrap();
+        let view = studio.poll().unwrap().profiles;
+        assert_eq!(view.active.controls, "Stream");
+        assert_eq!(view.controls, ["Default", "Stream"]);
+        assert!(!view.unsaved);
+        assert!(
+            folder
+                .text("controls/Stream.toml")
+                .contains("samplerTopLeft")
+        );
+        // The old one is as it was.
+        assert!(
+            !folder
+                .text("controls/Default.toml")
+                .contains("samplerTopLeft")
+        );
+
+        // Changing profile changes the buttons.
+        studio.run(select(Kind::Profile, "Default")).unwrap();
+        assert_eq!(does(&mut studio, PAD, Gesture::Long), None);
+        studio.run(select(Kind::Profile, "Stream")).unwrap();
+        assert!(does(&mut studio, PAD, Gesture::Long).is_some());
+    }
+
+    #[test]
+    fn the_controls_can_be_changed_alone_like_the_mix_and_the_microphone() {
+        let folder = Folder::new();
+        let mut studio = launch(&folder);
+        studio.apply(headphones(70)).unwrap();
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Mute)))
+            .unwrap();
+        studio.run(save_as(Kind::Controls, "Loud pad")).unwrap();
+        let view = studio.poll().unwrap().profiles;
+        assert_eq!(view.active.controls, "Loud pad");
+        assert!(
+            view.dirty.profile,
+            "the profile is made of other pieces now"
+        );
+        assert!(view.dirty.mix);
+        assert!(!view.dirty.controls);
+
+        studio.run(select(Kind::Controls, "Default")).unwrap();
+        assert_eq!(does(&mut studio, PAD, Gesture::Long), None);
+        // The mix was not touched by it.
+        assert!(studio.poll().unwrap().profiles.dirty.mix);
+        studio.run(select(Kind::Controls, "Loud pad")).unwrap();
+        assert!(does(&mut studio, PAD, Gesture::Long).is_some());
+
+        // Renamed, deleted, or refused, like the others.
+        studio
+            .run(ProfileCommand::Rename {
+                kind: Kind::Controls,
+                name: "Loud pad".into(),
+                to: "Desk".into(),
+            })
+            .unwrap();
+        assert_eq!(studio.poll().unwrap().profiles.active.controls, "Desk");
+        let delete = |name: &str| ProfileCommand::Delete {
+            kind: Kind::Controls,
+            name: name.into(),
+        };
+        assert_eq!(studio.run(delete("Desk")), Err(ProfileError::InUse));
+        // The profile still names it: a piece a profile is made of stays.
+        assert_eq!(studio.run(delete("Default")), Err(ProfileError::InUse));
+    }
+
+    #[test]
+    fn a_profile_copied_gets_copies_of_its_controls() {
+        let folder = Folder::new();
+        let mut studio = launch(&folder);
+        studio
+            .apply(give(PAD, Gesture::Long, mute_music(MuteMode::Mute)))
+            .unwrap();
+        studio.run(SAVE).unwrap();
+        studio
+            .run(ProfileCommand::Duplicate {
+                kind: Kind::Profile,
+                name: "Default".into(),
+                to: "Copy".into(),
+            })
+            .unwrap();
+        assert!(folder.text("controls/Copy.toml").contains("samplerTopLeft"));
+        studio.run(select(Kind::Profile, "Copy")).unwrap();
+        assert!(does(&mut studio, PAD, Gesture::Long).is_some());
+    }
+
+    #[test]
+    fn a_profile_whose_controls_were_never_written_can_still_be_copied() {
+        let folder = Folder::new();
+        launch(&folder);
+        std::fs::remove_dir_all(folder.0.join("controls")).unwrap();
+        let mut studio = launch(&folder);
+        let copy = ProfileCommand::Duplicate {
+            kind: Kind::Profile,
+            name: "Default".into(),
+            to: "Copy".into(),
+        };
+        studio.run(copy).unwrap();
+        // The copy has all its pieces, the controls made of the starting buttons.
+        for piece in ["mixes", "mics", "controls", "profiles"] {
+            assert!(folder.0.join(piece).join("Copy.toml").exists(), "{piece}");
+        }
+        studio.run(select(Kind::Profile, "Copy")).unwrap();
+        assert!(does(&mut studio, Button::MicMute, Gesture::Short).is_some());
+        assert!(!studio.unsaved());
+    }
+
+    #[test]
+    fn a_profile_that_cannot_be_copied_leaves_no_piece_behind() {
+        let folder = Folder::new();
+        launch(&folder);
+        // A second profile, so that the first can be torn.
+        let mut studio = launch(&folder);
+        studio.run(save_as(Kind::Profile, "Other")).unwrap();
+        folder.put("controls/Other.toml", "format = 1\n[buttons.mic");
+        let copy = ProfileCommand::Duplicate {
+            kind: Kind::Profile,
+            name: "Other".into(),
+            to: "Copy".into(),
+        };
+        assert_eq!(studio.run(copy), Err(ProfileError::Unreadable));
+        for piece in ["mixes", "mics", "controls", "profiles"] {
+            assert!(!folder.0.join(piece).join("Copy.toml").exists(), "{piece}");
+        }
+    }
+
+    #[test]
+    fn a_button_held_while_the_profile_changes_ends_with_what_it_began_with() {
+        let folder = Folder::new();
+        let (mut studio, hands) = launch_plugged(&folder);
+        studio
+            .apply(Intent::SetGesture {
+                button: Button::MicMute,
+                gesture: Gesture::Hold,
+                action: Some(Action::Mute {
+                    target: AudioTarget::Mic,
+                    mode: MuteMode::Mute,
+                }),
+            })
+            .unwrap();
+        studio.run(save_as(Kind::Profile, "Held")).unwrap();
+        // Another profile, where the same button is a plain switch.
+        studio.run(select(Kind::Profile, "Default")).unwrap();
+        studio.run(select(Kind::Profile, "Held")).unwrap();
+        studio.poll().unwrap();
+
+        hands.press(Button::MicMute);
+        assert!(studio.poll().unwrap().mic_off);
+        studio.run(select(Kind::Profile, "Default")).unwrap();
+        assert!(studio.poll().unwrap().mic_off, "still held");
+        hands.release(Button::MicMute);
+        assert!(
+            !studio.poll().unwrap().mic_off,
+            "the hold ended as it began"
+        );
+
+        // The next press belongs to the profile now in use: a switch.
+        hands.press(Button::MicMute);
+        assert!(studio.poll().unwrap().mic_off);
+        hands.release(Button::MicMute);
+        assert!(studio.poll().unwrap().mic_off);
     }
 }

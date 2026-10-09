@@ -106,11 +106,12 @@ function mic(overrides: Partial<MicView> = {}): MicView {
 
 function profiles(overrides: Partial<ProfilesView> = {}): ProfilesView {
   return {
-    active: { profile: 'Stream', mix: 'Desk', mic: 'Radio' },
+    active: { profile: 'Stream', mix: 'Desk', mic: 'Radio', controls: 'Keys' },
     profiles: ['Game', 'Stream'],
     mixes: ['Desk', 'Quiet'],
     mics: ['Headset', 'Radio'],
-    dirty: { profile: false, mix: false, mic: false },
+    controls: ['Keys', 'Pads'],
+    dirty: { profile: false, mix: false, mic: false, controls: false },
     unsaved: false,
     ...overrides,
   };
@@ -206,7 +207,7 @@ describe('App', () => {
 
   it('still marks the sections that are not built as coming soon', async () => {
     render(App);
-    await fireEvent.click(screen.getByRole('button', { name: 'Controls' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Lighting' }));
     expect(screen.getByText('Coming soon')).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Mixer' }));
     expect(screen.queryByText(/later version/)).toBeNull();
@@ -866,7 +867,7 @@ describe('App', () => {
 
   describe('with profiles', () => {
     const unsaved = () =>
-      profiles({ dirty: { profile: false, mix: false, mic: true }, unsaved: true });
+      profiles({ dirty: { profile: false, mix: false, mic: true, controls: false }, unsaved: true });
     const card = (name: string) => within(screen.getByRole('region', { name }));
     const banner = () => screen.queryByRole('region', { name: 'Unsaved changes' });
 
@@ -925,7 +926,7 @@ describe('App', () => {
       expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Profiles');
       expect(
         screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
-      ).toEqual(['Profiles', 'Mixes', 'Microphones']);
+      ).toEqual(['Profiles', 'Mixes', 'Microphones', 'Controls']);
 
       const names = (region: string) =>
         card(region)
@@ -943,7 +944,11 @@ describe('App', () => {
         ['Headset', 'false'],
         ['Radio In use', 'true'],
       ]);
-      expect(screen.getByText(/Controls and lighting/)).toBeTruthy();
+      expect(names('Controls')).toEqual([
+        ['Keys In use', 'true'],
+        ['Pads', 'false'],
+      ]);
+      expect(screen.getByText(/Lighting will become a piece/)).toBeTruthy();
     });
 
     it('switches to another profile or to another piece', async () => {
@@ -1089,7 +1094,7 @@ describe('App', () => {
       render(App);
       await report(
         snapshot({
-          profiles: profiles({ dirty: { profile: false, mix: true, mic: false }, unsaved: true }),
+          profiles: profiles({ dirty: { profile: false, mix: true, mic: false, controls: false }, unsaved: true }),
         }),
       );
       feed.askToQuit();

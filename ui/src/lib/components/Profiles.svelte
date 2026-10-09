@@ -24,7 +24,13 @@
   let field: HTMLInputElement | undefined = $state();
 
   function names(view: ProfilesView, kind: ProfileKind): string[] {
-    return kind === 'profile' ? view.profiles : kind === 'mix' ? view.mixes : view.mics;
+    const lists: Record<ProfileKind, string[]> = {
+      profile: view.profiles,
+      mix: view.mixes,
+      mic: view.mics,
+      controls: view.controls,
+    };
+    return lists[kind];
   }
 
   /** Saving a profile saves its pieces too. */

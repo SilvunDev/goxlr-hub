@@ -19,7 +19,10 @@
           <FaderStrip {view} />
         {/each}
       </div>
-      <Pads pressed={Array.isArray(device.pressed) ? device.pressed : []} />
+      <Pads
+        pressed={Array.isArray(device.pressed) ? device.pressed : []}
+        lit={Array.isArray(device.touched) ? device.touched : undefined}
+      />
       <aside>
         <MicMeter levelDb={device.micLevelDb} />
         <div class="mic">
