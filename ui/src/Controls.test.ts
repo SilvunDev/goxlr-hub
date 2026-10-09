@@ -830,7 +830,7 @@ describe('Controls', () => {
       expect(amount.value).toBe('5');
       await fireEvent.input(amount, { target: { value: '12' } });
       expect(feed.sent.at(-1)).toMatchObject({ action: { type: 'volume', percent: 12 } });
-      expect(screen.getByText(/starts from 50%/)).toBeTruthy();
+      expect(screen.getByText(/do nothing while the app does not know this volume/)).toBeTruthy();
     });
   });
 
@@ -1026,7 +1026,7 @@ describe('Controls', () => {
       expect(step.getAttribute('max')).toBe('10');
       await fireEvent.input(step, { target: { value: '7' } });
       expect(feed.sent.at(-1)).toMatchObject({ action: { step: 7 } });
-      expect(screen.getByText(/starts from 50%/)).toBeTruthy();
+      expect(screen.getByText(/Set this volume once first/)).toBeTruthy();
 
       await fireEvent.change(screen.getByRole('combobox', { name: 'What the dial does' }), {
         target: { value: 'none' },
@@ -1062,6 +1062,8 @@ describe('Controls', () => {
         'Molette réverbe : Rien',
         'Molette écho : Rien',
       ]);
+      await fireEvent.click(cells[1]);
+      expect(screen.getByText(/Réglez ce volume une première fois/)).toBeTruthy();
     });
   });
 

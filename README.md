@@ -48,8 +48,8 @@ other gesture. The buttons work as long as the app runs, window closed or not.
 A button that switches profile does it at once and does not ask: changes that
 are not saved are lost, and the Controls screen says so when the action is
 chosen. A dial is followed by how far it turns, never by where it stands. A
-volume the app does not know yet (a track on no fader that was never set)
-starts from half way when a button or a dial raises or lowers it.
+volume the app does not know yet (a track on no fader that was never set) is
+left alone by a button or a dial that raises or lowers it: set it once first.
 
 Each file says which format it is written in. A file made by a newer version
 of the app is neither loaded nor overwritten by an older one. The first time

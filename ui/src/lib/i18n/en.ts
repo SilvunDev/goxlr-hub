@@ -211,7 +211,7 @@ export const en = {
       modes: { set: 'Set to', up: 'Raise by', down: 'Lower by' },
       amount: 'Amount',
       percent: '{percent}%',
-      hint: 'A volume the app does not know yet starts from 50% when raised or lowered.',
+      hint: 'Raise and lower do nothing while the app does not know this volume. Set it once first, with “Set to” or in Channels.',
     },
     profile: {
       kind: 'What to switch',
@@ -232,7 +232,8 @@ export const en = {
       none: 'Nothing',
       volume: 'Volume of a track',
       step: 'Each notch moves the volume by',
-      unknown: 'A volume the app does not know yet starts from 50% at the first notch.',
+      unknown:
+        'Set this volume once first, in Channels or with a “Set to” button, so that the dial follows it. Until then the dial does nothing.',
       choose: 'Choose a dial to set what it does.',
       turnDown: 'Turn {wheel} down one notch',
       turnUp: 'Turn {wheel} up one notch',

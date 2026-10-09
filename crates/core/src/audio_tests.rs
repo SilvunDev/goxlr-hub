@@ -498,30 +498,42 @@ fn unknown_hub() -> (Hub, VirtualHandle, ManualClock) {
 }
 
 #[test]
-fn a_volume_the_app_does_not_know_is_raised_or_lowered_from_half_way() {
+fn a_volume_the_app_does_not_know_is_left_alone_by_raising_and_lowering_it() {
     let (mut hub, hands, clock) = unknown_hub();
     let index = usize::from(Channel::Headphones.index());
+    let headphones = |mode, percent| volume(Channel::Headphones, mode, percent);
     assert_eq!(hub.mixer().volumes[index], None);
     give(
         &mut hub,
         PAD,
         Gesture::Short,
-        volume(Channel::Headphones, VolumeMode::Down, 10),
+        headphones(VolumeMode::Down, 10),
     );
-    tap(&mut hub, &hands, &clock, PAD);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 101);
-    assert_eq!(hub.mixer().volumes[index], Some(101));
+    give(
+        &mut hub,
+        OTHER_PAD,
+        Gesture::Short,
+        headphones(VolumeMode::Up, 10),
+    );
+    give(
+        &mut hub,
+        Button::Bleep,
+        Gesture::Short,
+        headphones(VolumeMode::Set, 40),
+    );
+    let before = volume_of(&hands, Channel::Headphones);
 
-    // Nothing asked, nothing set: a change of nothing leaves it unknown.
-    let (mut hub, hands, clock) = unknown_hub();
-    give(
-        &mut hub,
-        PAD,
-        Gesture::Short,
-        volume(Channel::Headphones, VolumeMode::Up, 0),
-    );
+    // A guess could be louder than what the headphones are at.
     tap(&mut hub, &hands, &clock, PAD);
+    tap(&mut hub, &hands, &clock, OTHER_PAD);
     assert_eq!(hub.mixer().volumes[index], None);
+    assert_eq!(volume_of(&hands, Channel::Headphones), before);
+
+    // Set once, it is known, and the others follow from there.
+    tap(&mut hub, &hands, &clock, Button::Bleep);
+    assert_eq!(hub.mixer().volumes[index], Some(102));
+    tap(&mut hub, &hands, &clock, PAD);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 76);
 }
 
 fn wheel_to(channel: Channel, step: u8) -> Intent {
@@ -670,12 +682,78 @@ fn turns_made_while_the_device_was_out_of_sight_are_not_counted() {
 }
 
 #[test]
-fn a_volume_the_app_does_not_know_is_turned_from_half_way() {
+fn a_dial_leaves_a_volume_the_app_does_not_know_alone_until_it_is_set() {
     let (mut hub, hands, clock) = unknown_hub();
     hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
+    let before = volume_of(&hands, Channel::Headphones);
+    // A turn that is fast, and a turn that is slow: the same nothing.
     hands.turn(Wheel::Pitch, 2);
     after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 147);
+    hands.turn(Wheel::Pitch, 20);
+    after(&mut hub, &clock, 50);
+    assert_eq!(volume_of(&hands, Channel::Headphones), before);
+    assert_eq!(
+        hub.mixer().volumes[usize::from(Channel::Headphones.index())],
+        None
+    );
+
+    set_headphones(&mut hub, 100);
+    hands.turn(Wheel::Pitch, 2);
+    after(&mut hub, &clock, 50);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 120);
+}
+
+#[test]
+fn a_tap_begun_under_other_buttons_does_not_end_under_these() {
+    let (mut hub, hands, clock) = timed_hub();
+    set_headphones(&mut hub, 50);
+    let set = |percent| volume(Channel::Headphones, VolumeMode::Set, percent);
+    give(&mut hub, PAD, Gesture::Short, set(20));
+    give(
+        &mut hub,
+        PAD,
+        Gesture::Double,
+        track(Channel::Chat, MuteMode::Mute),
+    );
+    let mut other = hub.settings();
+    other.controls = crate::Controls::default();
+    other.controls.set(PAD, Gesture::Short, Some(set(100)));
+    let before = volume_of(&hands, Channel::Headphones);
+
+    // A tap that waits for a second one, then other buttons come.
+    tap_without_waiting(&mut hub, &hands, &clock, PAD);
+    hub.load(other.clone()).unwrap();
+    after(&mut hub, &clock, 1000);
+    assert_eq!(volume_of(&hands, Channel::Headphones), before);
+
+    // A press that is still going down, then other buttons come.
+    let (mut hub, hands, clock) = timed_hub();
+    set_headphones(&mut hub, 50);
+    give(&mut hub, PAD, Gesture::Short, set(20));
+    give(
+        &mut hub,
+        PAD,
+        Gesture::Long,
+        track(Channel::Chat, MuteMode::Mute),
+    );
+    hands.press(PAD);
+    after(&mut hub, &clock, 100);
+    hub.load(other).unwrap();
+    hands.release(PAD);
+    after(&mut hub, &clock, 1000);
+    assert_eq!(volume_of(&hands, Channel::Headphones), before);
+
+    // The new buttons work from the next press.
+    tap(&mut hub, &hands, &clock, PAD);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 255);
+}
+
+/// A press and a release, one reading each, and no waiting after.
+fn tap_without_waiting(hub: &mut Hub, hands: &VirtualHandle, clock: &ManualClock, button: Button) {
+    hands.press(button);
+    after(hub, clock, 50);
+    hands.release(button);
+    after(hub, clock, 50);
 }
 
 #[test]

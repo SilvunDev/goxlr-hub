@@ -210,7 +210,7 @@ export const fr: Messages = {
       modes: { set: 'Mettre à', up: 'Monter de', down: 'Baisser de' },
       amount: 'Quantité',
       percent: '{percent} %',
-      hint: 'Un volume que l’appli ne connaît pas encore part de 50 % quand on le monte ou le baisse.',
+      hint: 'Monter et baisser ne font rien tant que l’appli ne connaît pas ce volume. Réglez-le une première fois, avec « Mettre à » ou dans Pistes audio.',
     },
     profile: {
       kind: 'Ce qu’il faut changer',
@@ -232,7 +232,8 @@ export const fr: Messages = {
       none: 'Rien',
       volume: 'Volume d’une piste',
       step: 'Chaque cran déplace le volume de',
-      unknown: 'Un volume que l’appli ne connaît pas encore part de 50 % au premier cran.',
+      unknown:
+        'Réglez ce volume une première fois (dans Pistes audio, ou avec une touche « Mettre à ») pour que la molette le suive. Tant qu’il est inconnu, la molette ne fait rien.',
       choose: 'Choisissez une molette pour régler ce qu’elle fait.',
       turnDown: 'Tourner {wheel} d’un cran vers le bas',
       turnUp: 'Tourner {wheel} d’un cran vers le haut',

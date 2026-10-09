@@ -206,7 +206,7 @@ impl<P: Port> Studio<P> {
     }
 
     fn dirty(&self) -> Dirty {
-        let settings = self.station.settings();
+        let settings = self.station.settings_at_rest();
         Dirty {
             mix: !self.saved.mix.matches(&settings.mixer),
             mic: self.saved.mic != settings.mic,
@@ -271,6 +271,7 @@ impl<P: Port> Studio<P> {
         match kind {
             Kind::Profile => {
                 let saved = Self::read(&self.library, name)?;
+                self.station.forget_route_holds();
                 self.load(&saved.mix, &saved.mic, &saved.controls)?;
                 self.profile = name.into();
                 self.active = saved.assembly.clone();
@@ -281,6 +282,7 @@ impl<P: Port> Studio<P> {
             }
             Kind::Mix => {
                 let mix = self.library.read_mix(name)?;
+                self.station.forget_route_holds();
                 let settings = self.station.settings();
                 let (mic, controls) = (settings.mic.clone(), settings.controls.clone());
                 self.load(&mix, &mic, &controls)?;
@@ -310,7 +312,7 @@ impl<P: Port> Studio<P> {
     }
 
     fn save_mix(&mut self, name: &str) -> Result<(), ProfileError> {
-        let mix = MixPiece::of(&self.station.settings().mixer);
+        let mix = MixPiece::of(&self.station.settings_at_rest().mixer);
         self.library.write_mix(name, &mix)?;
         self.active.mix = name.into();
         self.saved.mix = mix;
@@ -1539,5 +1541,77 @@ mod tests {
         studio.poll().unwrap();
         hands.press(SWITCH_PAD);
         assert_eq!(studio.poll().unwrap().profiles.active.profile, "Default");
+    }
+
+    fn hold_cut(button: Button) -> Intent {
+        give(
+            button,
+            Gesture::Hold,
+            Action::Route {
+                input: RoutingInput::Music,
+                output: RoutingOutput::BroadcastMix,
+                mode: crate::RouteMode::Off,
+            },
+        )
+    }
+
+    fn music_to_stream(hands: &VirtualHandle) -> bool {
+        hands
+            .state()
+            .routed(RoutingInput::Music, Side::Left)
+            .contains(RoutingOutput::BroadcastMix)
+    }
+
+    #[test]
+    fn a_cell_cut_by_a_finger_is_no_change_and_is_not_saved_cut() {
+        let folder = Folder::new();
+        let (mut studio, hands) = launch_plugged(&folder);
+        studio.apply(hold_cut(SWITCH_PAD)).unwrap();
+        // The faders are read first: what they show is saved with the rest.
+        studio.poll().unwrap();
+        studio.run(SAVE).unwrap();
+        let saved = folder.text("mixes/Default.toml");
+
+        hands.press(SWITCH_PAD);
+        let snapshot = studio.poll().unwrap();
+        assert!(!music_to_stream(&hands), "the cell is cut");
+        assert!(!snapshot.profiles.dirty.mix && !snapshot.profiles.unsaved);
+        assert!(!studio.unsaved());
+
+        // Saved with the finger on the button, the cell is saved as it was.
+        studio.run(SAVE).unwrap();
+        assert_eq!(folder.text("mixes/Default.toml"), saved);
+        hands.release(SWITCH_PAD);
+        studio.poll().unwrap();
+        assert!(music_to_stream(&hands));
+        assert!(!studio.unsaved());
+    }
+
+    #[test]
+    fn a_profile_saved_with_a_cell_cut_is_not_put_back_against_a_finger() {
+        let folder = Folder::new();
+        let (mut studio, hands) = launch_plugged(&folder);
+        // A profile whose music is not sent to the stream.
+        studio
+            .apply(Intent::SetRoute {
+                input: RoutingInput::Music,
+                output: RoutingOutput::BroadcastMix,
+                on: false,
+            })
+            .unwrap();
+        studio.run(save_as(Kind::Profile, "Quiet")).unwrap();
+        studio.run(select(Kind::Profile, "Default")).unwrap();
+        studio.apply(hold_cut(SWITCH_PAD)).unwrap();
+        studio.poll().unwrap();
+
+        hands.press(SWITCH_PAD);
+        studio.poll().unwrap();
+        assert!(!music_to_stream(&hands));
+        // The routing loaded is the same as the one the finger made.
+        studio.run(select(Kind::Profile, "Quiet")).unwrap();
+        hands.release(SWITCH_PAD);
+        let snapshot = studio.poll().unwrap();
+        assert!(!music_to_stream(&hands), "the profile says it is cut");
+        assert!(!snapshot.profiles.unsaved);
     }
 }

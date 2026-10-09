@@ -45,10 +45,6 @@ const FADER_TRAVEL_READINGS: u8 = 20;
 /// not: it is a reading to ignore.
 const MAX_WHEEL_JUMP: i16 = 24;
 
-/// Where a volume the app does not know starts when a button or a dial raises
-/// or lowers it: half way.
-const UNKNOWN_VOLUME: u8 = 127;
-
 /// A button stays lit on screen this long after it was let go, so that a
 /// quick press can be seen.
 const AFTERGLOW: Duration = Duration::from_millis(600);
@@ -405,6 +401,8 @@ pub struct Hub {
     loads: Vec<Load>,
     /// Tracks whose volume the app set since the last time it was asked.
     volumes_set: Vec<Channel>,
+    /// Volumes only shown, on the virtual device: the app does not know them.
+    invented: [bool; Channel::COUNT],
 }
 
 impl Hub {
@@ -456,6 +454,7 @@ impl Hub {
             encoders: None,
             loads: Vec::new(),
             volumes_set: Vec::new(),
+            invented: [false; Channel::COUNT],
         };
         hub.send_all()?;
         Ok(hub)
@@ -467,6 +466,10 @@ impl Hub {
         // put back: the routing loaded wins.
         if settings.mixer.routing != self.mixer.routing {
             self.forget_route_holds();
+        }
+        // A tap begun under other buttons must not end under these.
+        if settings.controls != self.controls {
+            self.recognizer.buttons_changed();
         }
         self.mixer = settings.mixer;
         self.mic = settings.mic;
@@ -531,8 +534,26 @@ impl Hub {
         }
     }
 
-    /// Forgets the route holds, leaving the routing as it is.
-    fn forget_route_holds(&mut self) {
+    /// Says which volumes are only shown, not known: a button or a dial that
+    /// raises or lowers a volume leaves those alone.
+    pub(crate) fn mark_invented(&mut self, invented: [bool; Channel::COUNT]) {
+        self.invented = invented;
+    }
+
+    /// What the cells held by a finger were before: the routing at rest.
+    pub(crate) fn route_holds_before(&self) -> Vec<(RoutingInput, RoutingOutput, bool)> {
+        self.before_holds
+            .iter()
+            .filter_map(|(target, before)| match target {
+                Switch::Route(input, output) => Some((*input, *output, *before)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Forgets the route holds, leaving the routing as it is: for when the
+    /// routing is about to be replaced by another one.
+    pub(crate) fn forget_route_holds(&mut self) {
         self.before_holds.retain(|(target, _)| !target.is_route());
         for hold in &mut self.holds {
             hold.targets.retain(|target| !target.is_route());
@@ -648,6 +669,7 @@ impl Hub {
     fn set_volume(&mut self, channel: Channel, volume: u8) -> Result<(), DeviceError> {
         self.send_volume(channel, volume)?;
         self.mixer.volumes[usize::from(channel.index())] = Some(volume);
+        self.invented[usize::from(channel.index())] = false;
         if !self.volumes_set.contains(&channel) {
             self.volumes_set.push(channel);
         }
@@ -655,10 +677,14 @@ impl Hub {
     }
 
     /// Moves a volume by some units of the 0 to 255 range, without leaving
-    /// it. A volume the app does not know starts half way.
+    /// it. A volume the app does not know is left alone: it is no use
+    /// guessing, the guess could be louder than what it is. It is known once
+    /// it was set.
     fn change_volume(&mut self, channel: Channel, change: i32) -> Result<(), DeviceError> {
         let at = usize::from(channel.index());
-        let current = self.mixer.volumes[at].unwrap_or(UNKNOWN_VOLUME);
+        let Some(current) = self.mixer.volumes[at].filter(|_| !self.invented[at]) else {
+            return Ok(());
+        };
         let wanted = (i32::from(current) + change).clamp(0, i32::from(u8::MAX)) as u8;
         if self.mixer.volumes[at] == Some(wanted) {
             return Ok(());

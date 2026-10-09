@@ -84,7 +84,7 @@ impl<P: Port> Station<P> {
     /// one and brings it to the same settings.
     pub fn new(port: P, settings: Settings) -> Result<Self, DeviceError> {
         let (device, hands) = open_virtual()?;
-        Ok(Self {
+        let mut station = Self {
             port,
             demo: Hub::adopt(Box::new(device), Some(&for_show(&settings)))?,
             hands,
@@ -92,7 +92,38 @@ impl<P: Port> Station<P> {
             connection: Connection::Demo,
             settings,
             lost: false,
-        })
+        };
+        station.demo_shows_what_is_unknown();
+        Ok(station)
+    }
+
+    /// The volumes the settings do not know are shown lively on the virtual
+    /// device, and are no more known for it: a button or a dial that raises
+    /// or lowers one does nothing.
+    fn demo_shows_what_is_unknown(&mut self) {
+        self.demo
+            .mark_invented(self.settings.mixer.volumes.map(|volume| volume.is_none()));
+    }
+
+    /// The settings at rest: what a cell held by a finger was before the
+    /// finger came is what a profile is compared with and saved as.
+    pub fn settings_at_rest(&self) -> Settings {
+        let mut settings = self.settings.clone();
+        let hub = self.hardware.as_ref().unwrap_or(&self.demo);
+        for (input, output, before) in hub.route_holds_before() {
+            let outputs = &mut settings.mixer.routing[input as usize];
+            *outputs = outputs.with(output, before);
+        }
+        settings
+    }
+
+    /// The cells held by a finger are let be: the routing is about to be
+    /// replaced, and what comes will not be put back against it.
+    pub(crate) fn forget_route_holds(&mut self) {
+        self.demo.forget_route_holds();
+        if let Some(hub) = &mut self.hardware {
+            hub.forget_route_holds();
+        }
     }
 
     pub fn connection(&self) -> &Connection {
@@ -205,6 +236,8 @@ impl<P: Port> Station<P> {
             let mixer = hub.settings().mixer;
             settings.mixer.muted = mixer.muted;
             settings.mixer.mic_off = mixer.mic_off;
+            // The cell the finger cut is back, the way the hub put it.
+            settings.mixer.routing = mixer.routing;
             self.hardware = None;
             self.lost = true;
             self.connection = Connection::Demo;
@@ -212,6 +245,7 @@ impl<P: Port> Station<P> {
         }
         self.demo.load(for_show(&settings))?;
         self.settings = settings;
+        self.demo_shows_what_is_unknown();
         Ok(())
     }
 
@@ -248,6 +282,7 @@ impl<P: Port> Station<P> {
         }
         // The virtual device always answers.
         let _ = self.demo.load(for_show(&self.settings));
+        self.demo_shows_what_is_unknown();
         // It was not read while the real one was shown.
         self.demo.forget_presses();
     }
@@ -1231,7 +1266,10 @@ mod tests {
 
     #[test]
     fn a_dial_is_turned_from_the_screen_on_the_virtual_device_only() {
-        let (mut virtual_station, _) = station([]);
+        let channel = usize::from(Channel::Headphones.index());
+        let (device, bench) = real_device();
+        let (mut virtual_station, _) = station([Err(OpenError::Absent), Ok(device)]);
+        virtual_station.scan();
         virtual_station.poll().unwrap();
         virtual_station
             .apply(Intent::SetWheel {
@@ -1248,24 +1286,44 @@ mod tests {
             wheel: goxlr_hub_protocol::Wheel::Pitch,
             notches,
         };
+
+        // The virtual device shows a lively volume the app does not know: a
+        // dial does not start from it, nor keep what it would give.
         virtual_station.apply(turn(-3)).unwrap();
         let snapshot = virtual_station.poll().unwrap();
-        let headphones = snapshot.channels[usize::from(Channel::Headphones.index())];
-        assert_eq!(headphones.volume, Some(224));
-        // What a dial set is what the real device is brought to when it comes
-        // and what a profile saves, like a volume set from the screen.
-        assert_eq!(
-            virtual_station.settings().mixer.volumes[usize::from(Channel::Headphones.index())],
-            Some(224)
-        );
+        assert_eq!(snapshot.channels[channel].volume, Some(255));
+        assert_eq!(virtual_station.settings().mixer.volumes[channel], None);
 
-        // The real device is not turned by a click on a screen.
+        // Set once, it is known: the dial follows, and what it sets is kept.
+        virtual_station
+            .apply(Intent::SetVolume {
+                channel: Channel::Headphones,
+                volume: 100,
+            })
+            .unwrap();
+        virtual_station.apply(turn(-3)).unwrap();
+        let snapshot = virtual_station.poll().unwrap();
+        assert_eq!(snapshot.channels[channel].volume, Some(69));
+        assert_eq!(virtual_station.settings().mixer.volumes[channel], Some(69));
+
+        // That is what the real device is brought to, and nothing else.
+        virtual_station.scan();
+        assert_eq!(bench.volumes_received(), [(Channel::Headphones, 69)]);
+    }
+
+    #[test]
+    fn a_real_device_is_never_turned_from_the_screen() {
         let (device, bench) = real_device();
         let (mut station, _) = station([Ok(device)]);
         station.scan();
         station.poll().unwrap();
         let before = bench.received.lock().unwrap().len();
-        station.apply(turn(5)).unwrap();
+        station
+            .apply(Intent::TurnWheel {
+                wheel: goxlr_hub_protocol::Wheel::Pitch,
+                notches: 5,
+            })
+            .unwrap();
         station.poll().unwrap();
         assert_eq!(bench.hands.state().encoders, [0; 4]);
         let received = bench.received.lock().unwrap();
@@ -1276,5 +1334,42 @@ mod tests {
             "{:?}",
             &received[before..]
         );
+    }
+
+    #[test]
+    fn settings_loaded_on_a_device_that_dropped_do_not_keep_a_cell_a_hold_cut() {
+        let (device, bench) = real_device();
+        let (mut station, _) = station([Ok(device)]);
+        station.scan();
+        station.poll().unwrap();
+        station
+            .apply(Intent::SetGesture {
+                button: Button::SamplerTopLeft,
+                gesture: Gesture::Hold,
+                action: Some(Action::Route {
+                    input: RoutingInput::Music,
+                    output: RoutingOutput::BroadcastMix,
+                    mode: crate::RouteMode::Off,
+                }),
+            })
+            .unwrap();
+        bench.hands.press(Button::SamplerTopLeft);
+        station.poll().unwrap();
+        assert!(
+            !station.settings().mixer.routing[RoutingInput::Music as usize]
+                .contains(RoutingOutput::BroadcastMix)
+        );
+        // At rest, the cell is as it was before the finger came.
+        assert_eq!(
+            station.settings_at_rest().mixer.routing,
+            crate::default_routing()
+        );
+
+        // What a change of piece loads is made of the settings in use.
+        let settings = station.settings().clone();
+        bench.unplugged.store(true, Ordering::Relaxed);
+        station.load(settings).unwrap();
+        assert_eq!(station.connection(), &Connection::Demo);
+        assert_eq!(station.settings().mixer.routing, crate::default_routing());
     }
 }
