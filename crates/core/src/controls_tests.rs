@@ -15,10 +15,10 @@ use crate::gestures::ManualClock;
 use crate::tests::resting_lights;
 use crate::{Action, AudioTarget, Bank, Gesture, Hub, Intent, MuteMode, Settings, Snapshot};
 
-const PAD: Button = Button::SamplerTopLeft;
+pub(crate) const PAD: Button = Button::SamplerTopLeft;
 
 /// A device that has been read once, at time zero.
-fn timed_hub() -> (Hub, VirtualHandle, ManualClock) {
+pub(crate) fn timed_hub() -> (Hub, VirtualHandle, ManualClock) {
     let (device, hands) = open_virtual().unwrap();
     let clock = ManualClock::default();
     let mut hub = Hub::connect(Box::new(device)).unwrap();
@@ -27,15 +27,15 @@ fn timed_hub() -> (Hub, VirtualHandle, ManualClock) {
     (hub, hands, clock)
 }
 
-fn mute(target: AudioTarget, mode: MuteMode) -> Action {
+pub(crate) fn mute(target: AudioTarget, mode: MuteMode) -> Action {
     Action::Mute { target, mode }
 }
 
-fn track(channel: Channel, mode: MuteMode) -> Action {
+pub(crate) fn track(channel: Channel, mode: MuteMode) -> Action {
     mute(AudioTarget::Channel { channel }, mode)
 }
 
-fn give(hub: &mut Hub, button: Button, gesture: Gesture, action: Action) {
+pub(crate) fn give(hub: &mut Hub, button: Button, gesture: Gesture, action: Action) {
     hub.apply(Intent::SetGesture {
         button,
         gesture,
@@ -44,12 +44,12 @@ fn give(hub: &mut Hub, button: Button, gesture: Gesture, action: Action) {
     .unwrap();
 }
 
-fn muted(hands: &VirtualHandle, channel: Channel) -> bool {
+pub(crate) fn muted(hands: &VirtualHandle, channel: Channel) -> bool {
     hands.state().muted[usize::from(channel.index())]
 }
 
 /// Lets time pass, then reads the device.
-fn after(hub: &mut Hub, clock: &ManualClock, ms: u64) -> Snapshot {
+pub(crate) fn after(hub: &mut Hub, clock: &ManualClock, ms: u64) -> Snapshot {
     clock.advance(Duration::from_millis(ms));
     hub.poll().unwrap()
 }
@@ -574,7 +574,7 @@ fn the_snapshot_tells_the_controls_what_was_touched_and_the_bank() {
     assert_eq!(value["bank"], "a");
 }
 
-const OTHER_PAD: Button = Button::SamplerTopRight;
+pub(crate) const OTHER_PAD: Button = Button::SamplerTopRight;
 
 fn hold_mic(hub: &mut Hub, button: Button) {
     give(
@@ -647,9 +647,9 @@ fn holds_on_one_target_are_all_let_go_with_the_device() {
 }
 
 /// A device that stops answering what it is told, but still answers readings.
-struct Deaf {
-    inner: VirtualGoXlr,
-    deaf: Arc<AtomicBool>,
+pub(crate) struct Deaf {
+    pub(crate) inner: VirtualGoXlr,
+    pub(crate) deaf: Arc<AtomicBool>,
 }
 
 impl Link for Deaf {

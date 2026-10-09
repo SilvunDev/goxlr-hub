@@ -16,13 +16,13 @@ use std::time::Duration;
 use goxlr_hub_device::{Device, DeviceError, DeviceKind};
 use goxlr_hub_protocol::{
     Button, ButtonLight, ButtonLights, ButtonSet, Channel, EqBand, Fader, MicType, OutputSet,
-    RoutingInput, RoutingOutput, mic_level_db,
+    RoutingInput, RoutingOutput, Wheel, mic_level_db,
 };
 use serde::{Deserialize, Serialize};
 
 pub use controls::{
     Action, AudioTarget, Bank, ButtonActions, ButtonView, Controls, ControlsView, DOUBLE_PRESS_MS,
-    LONG_PRESS_MS, MuteMode,
+    LONG_PRESS_MS, MuteMode, RouteMode, VolumeMode, WHEEL_STEP_PERCENT, WheelAction, WheelView,
 };
 pub use gestures::{Clock, Gesture, SystemClock};
 use gestures::{Event, Recognizer};
@@ -41,6 +41,14 @@ const FADER_TOLERANCE: u8 = 5;
 /// a second.
 const FADER_TRAVEL_READINGS: u8 = 20;
 
+/// A dial that seems to have moved further than this between two readings did
+/// not: it is a reading to ignore.
+const MAX_WHEEL_JUMP: i16 = 24;
+
+/// Where a volume the app does not know starts when a button or a dial raises
+/// or lowers it: half way.
+const UNKNOWN_VOLUME: u8 = 127;
+
 /// A button stays lit on screen this long after it was let go, so that a
 /// quick press can be seen.
 const AFTERGLOW: Duration = Duration::from_millis(600);
@@ -48,6 +56,11 @@ const AFTERGLOW: Duration = Duration::from_millis(600);
 /// Counts every press of a button, in the whole app, so that two presses of
 /// the same button are two for whoever looks, whichever device saw them.
 static PRESSES: AtomicU32 = AtomicU32::new(0);
+
+/// A percentage of the whole range of a volume, 0 to 255.
+fn percent_to_volume(percent: u8) -> u8 {
+    (u16::from(percent.min(100)) * u16::from(u8::MAX) + 50).div_euclid(100) as u8
+}
 
 /// The routing of a device the app meets: everything is heard in the
 /// headphones, on the stream and on the line output, the microphone goes to
@@ -156,7 +169,7 @@ impl Settings {
 }
 
 /// What the interface asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -237,11 +250,21 @@ pub enum Intent {
         long_press_ms: u16,
         double_press_ms: u16,
     },
+    /// Gives a dial something to do, or nothing.
+    SetWheel {
+        wheel: Wheel,
+        action: Option<WheelAction>,
+    },
     /// Presses or releases a button of the virtual device, as a mouse click
     /// would. The real device has real fingers.
     PressButton {
         button: Button,
         down: bool,
+    },
+    /// Turns a dial of the virtual device by some notches, as a finger would.
+    TurnWheel {
+        wheel: Wheel,
+        notches: i8,
     },
 }
 
@@ -326,18 +349,36 @@ struct Travel {
     readings_left: u8,
 }
 
-/// What a mute action acts on, once the fader it names is looked up.
+/// Something an action turns on or off, once the fader it names is looked
+/// up: a silence, or a cell of the routing grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Silenced {
+enum Switch {
+    /// The microphone itself. On means off, as a mute does.
     Mic,
     Channel(Channel),
+    /// On means sent.
+    Route(RoutingInput, RoutingOutput),
+}
+
+impl Switch {
+    fn is_route(self) -> bool {
+        matches!(self, Self::Route(..))
+    }
+}
+
+/// Something a button asked the app to load, once the reading is over: the
+/// device cannot load a profile, the profiles are kept elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Load {
+    pub kind: Kind,
+    pub name: String,
 }
 
 /// A hold that began: what it acts on. Kept as it was found, so that a
 /// profile loaded meanwhile changes nothing of it.
 struct Hold {
     button: Button,
-    targets: Vec<Silenced>,
+    targets: Vec<Switch>,
 }
 
 /// The app's side of one connected device.
@@ -353,11 +394,15 @@ pub struct Hub {
     recognizer: Recognizer,
     holds: Vec<Hold>,
     /// What each target of a hold was before the first hold on it, and
-    /// whether it was silenced: put back when the last hold on it ends.
-    before_holds: Vec<(Silenced, bool)>,
+    /// whether it was on: put back when the last hold on it ends.
+    before_holds: Vec<(Switch, bool)>,
     /// When each button was last seen down.
     last_down: [Option<Duration>; Button::ALL.len()],
     last_press: Option<LastPress>,
+    /// Where the dials were at the last reading.
+    encoders: Option<[i8; Wheel::COUNT]>,
+    /// Profiles asked for by buttons and not loaded yet.
+    loads: Vec<Load>,
 }
 
 impl Hub {
@@ -406,6 +451,8 @@ impl Hub {
             before_holds: Vec::new(),
             last_down: [None; Button::ALL.len()],
             last_press: None,
+            encoders: None,
+            loads: Vec::new(),
         };
         hub.send_all()?;
         Ok(hub)
@@ -413,6 +460,11 @@ impl Hub {
 
     /// Brings the device to other settings, all of them: those of a profile.
     pub fn load(&mut self, settings: Settings) -> Result<(), DeviceError> {
+        // A hold on a cell of a routing that is replaced has nothing left to
+        // put back: the routing loaded wins.
+        if settings.mixer.routing != self.mixer.routing {
+            self.forget_route_holds();
+        }
         self.mixer = settings.mixer;
         self.mic = settings.mic;
         self.controls = settings.controls;
@@ -471,26 +523,36 @@ impl Hub {
     /// come up.
     pub fn release_holds(&mut self) {
         self.holds.clear();
-        for (target, silenced) in std::mem::take(&mut self.before_holds) {
-            self.set_silenced(target, silenced);
+        for (target, before) in std::mem::take(&mut self.before_holds) {
+            self.put_state(target, before);
         }
     }
 
-    /// Forgets the presses the device showed before: for when it was out of
-    /// sight, and a button seen down then may be up now.
+    /// Forgets the route holds, leaving the routing as it is.
+    fn forget_route_holds(&mut self) {
+        self.before_holds.retain(|(target, _)| !target.is_route());
+        for hold in &mut self.holds {
+            hold.targets.retain(|target| !target.is_route());
+        }
+    }
+
+    /// Forgets the presses and the turns the device showed before: for when
+    /// it was out of sight, and a button seen down then may be up now.
     pub fn forget_presses(&mut self) {
         self.recognizer = Recognizer::default();
         self.held = None;
+        self.encoders = None;
+    }
+
+    /// The profiles the buttons asked for since the last time, in order.
+    pub(crate) fn take_loads(&mut self) -> Vec<Load> {
+        std::mem::take(&mut self.loads)
     }
 
     /// Does what the interface asked, on the device first.
     pub fn apply(&mut self, intent: Intent) -> Result<(), DeviceError> {
         match intent {
-            Intent::SetVolume { channel, volume } => {
-                self.send_volume(channel, volume)?;
-                self.mixer.volumes[usize::from(channel.index())] = Some(volume);
-                Ok(())
-            }
+            Intent::SetVolume { channel, volume } => self.set_volume(channel, volume),
             Intent::SetMuted { channel, muted } => self.set_muted(channel, muted),
             Intent::SetMicOff { off } => self.set_mic_off(off),
             Intent::AssignFader { fader, channel } => self.assign(fader, channel),
@@ -521,6 +583,10 @@ impl Hub {
                 self.controls.set(button, gesture, action);
                 self.send_lights()
             }
+            Intent::SetWheel { wheel, action } => {
+                self.controls.set_wheel(wheel, action);
+                Ok(())
+            }
             Intent::ResetControls { button } => {
                 match button {
                     Some(button) => self.controls.reset_button(button),
@@ -535,9 +601,9 @@ impl Hub {
                 self.controls.set_times(long_press_ms, double_press_ms);
                 Ok(())
             }
-            // Only the virtual device can be pressed from the screen, and the
-            // station does it.
-            Intent::PressButton { .. } => Ok(()),
+            // Only the virtual device can be pressed or turned from the screen,
+            // and the station does it.
+            Intent::PressButton { .. } | Intent::TurnWheel { .. } => Ok(()),
         }
     }
 
@@ -554,7 +620,8 @@ impl Hub {
         let outputs = self.mixer.routing[input as usize].with(output, on);
         self.device.set_routing(input, outputs)?;
         self.mixer.routing[input as usize] = outputs;
-        Ok(())
+        // A button may light for what a cell of the grid is.
+        self.send_lights()
     }
 
     /// Sends a volume; the fader that carries the channel will travel there.
@@ -567,6 +634,33 @@ impl Hub {
             });
         }
         Ok(())
+    }
+
+    fn set_volume(&mut self, channel: Channel, volume: u8) -> Result<(), DeviceError> {
+        self.send_volume(channel, volume)?;
+        self.mixer.volumes[usize::from(channel.index())] = Some(volume);
+        Ok(())
+    }
+
+    /// Moves a volume by some units of the 0 to 255 range, without leaving
+    /// it. A volume the app does not know starts half way.
+    fn change_volume(&mut self, channel: Channel, change: i32) -> Result<(), DeviceError> {
+        let at = usize::from(channel.index());
+        let current = self.mixer.volumes[at].unwrap_or(UNKNOWN_VOLUME);
+        let wanted = (i32::from(current) + change).clamp(0, i32::from(u8::MAX)) as u8;
+        if self.mixer.volumes[at] == Some(wanted) {
+            return Ok(());
+        }
+        self.set_volume(channel, wanted)
+    }
+
+    /// The track whose volume a target names.
+    fn volume_channel(&self, target: AudioTarget) -> Channel {
+        match target {
+            AudioTarget::Mic => Channel::Mic,
+            AudioTarget::Channel { channel } => channel,
+            AudioTarget::FaderTrack { fader } => self.mixer.faders[usize::from(fader.index())],
+        }
     }
 
     fn set_muted(&mut self, channel: Channel, muted: bool) -> Result<(), DeviceError> {
@@ -625,50 +719,73 @@ impl Hub {
     }
 
     /// What a mute action acts on, with the fader it names looked up.
-    fn silenced_by(&self, target: AudioTarget) -> Silenced {
+    fn silenced_by(&self, target: AudioTarget) -> Switch {
         match target {
-            AudioTarget::Mic => Silenced::Mic,
-            AudioTarget::Channel { channel } => Silenced::Channel(channel),
+            AudioTarget::Mic => Switch::Mic,
+            AudioTarget::Channel { channel } => Switch::Channel(channel),
             AudioTarget::FaderTrack { fader } => {
-                Silenced::Channel(self.mixer.faders[usize::from(fader.index())])
+                Switch::Channel(self.mixer.faders[usize::from(fader.index())])
             }
         }
     }
 
-    fn is_silenced(&self, target: Silenced) -> bool {
-        match target {
-            Silenced::Mic => self.mixer.mic_off,
-            Silenced::Channel(channel) => self.mixer.muted[usize::from(channel.index())],
+    /// What an action that turns something on or off acts on. A route that
+    /// makes no sense acts on nothing.
+    fn switch_of(&self, action: &Action) -> Option<Switch> {
+        match action {
+            Action::Mute { target, .. } => Some(self.silenced_by(*target)),
+            Action::Route { input, output, .. } => {
+                can_route(*input, *output).then_some(Switch::Route(*input, *output))
+            }
+            _ => None,
         }
     }
 
-    /// Writes what is silenced in the mixer only, without a word to the device.
-    fn set_silenced(&mut self, target: Silenced, silenced: bool) {
+    fn state(&self, target: Switch) -> bool {
         match target {
-            Silenced::Mic => self.mixer.mic_off = silenced,
-            Silenced::Channel(channel) => {
-                self.mixer.muted[usize::from(channel.index())] = silenced;
+            Switch::Mic => self.mixer.mic_off,
+            Switch::Channel(channel) => self.mixer.muted[usize::from(channel.index())],
+            Switch::Route(input, output) => self.mixer.routing[input as usize].contains(output),
+        }
+    }
+
+    /// Writes what is on in the mixer only, without a word to the device.
+    fn put_state(&mut self, target: Switch, on: bool) {
+        match target {
+            Switch::Mic => self.mixer.mic_off = on,
+            Switch::Channel(channel) => {
+                self.mixer.muted[usize::from(channel.index())] = on;
+            }
+            Switch::Route(input, output) => {
+                let outputs = &mut self.mixer.routing[input as usize];
+                *outputs = outputs.with(output, on);
             }
         }
     }
 
-    fn silence(&mut self, target: Silenced, silenced: bool) -> Result<(), DeviceError> {
+    fn drive(&mut self, target: Switch, on: bool) -> Result<(), DeviceError> {
         match target {
-            Silenced::Mic => self.set_mic_off(silenced),
-            Silenced::Channel(channel) => self.set_muted(channel, silenced),
+            Switch::Mic => self.set_mic_off(on),
+            Switch::Channel(channel) => self.set_muted(channel, on),
+            Switch::Route(input, output) => self.set_route(input, output, on),
         }
     }
 
     /// Whether what an action does is in force: a track silenced for an
-    /// action that silences it, open for one that opens it, the bank the
-    /// action switches to.
-    fn in_force(&self, action: Action) -> bool {
+    /// action that silences it, open for one that opens it, a cell cut for
+    /// an action that cuts it, the bank the action switches to.
+    fn in_force(&self, action: &Action) -> bool {
         match action {
             Action::Mute { target, mode } => {
-                let silenced = self.is_silenced(self.silenced_by(target));
-                silenced != (mode == MuteMode::Unmute)
+                let silenced = self.state(self.silenced_by(*target));
+                silenced != (*mode == MuteMode::Unmute)
             }
-            Action::Bank { bank } => self.mixer.bank == bank,
+            Action::Route { mode, .. } => match self.switch_of(action) {
+                Some(cell) => self.state(cell) == (*mode == RouteMode::On),
+                None => false,
+            },
+            Action::Volume { .. } | Action::Profile { .. } => false,
+            Action::Bank { bank } => self.mixer.bank == *bank,
         }
     }
 
@@ -680,7 +797,7 @@ impl Hub {
                 .controls
                 .actions(button)
                 .all()
-                .any(|action| self.in_force(action))
+                .any(|action| self.in_force(&action))
             {
                 lights.set(button, ButtonLight::Lit);
             }
@@ -695,18 +812,33 @@ impl Hub {
     /// Does what an action says.
     fn fire(&mut self, action: Action) -> Result<(), DeviceError> {
         match action {
-            Action::Mute { target, mode } => {
-                let target = self.silenced_by(target);
-                let silenced = self.is_silenced(target);
-                let wanted = match mode {
-                    MuteMode::Mute => true,
-                    MuteMode::Unmute => false,
-                    MuteMode::Toggle => !silenced,
-                };
-                if wanted == silenced {
+            Action::Mute { .. } | Action::Route { .. } => {
+                let Some(target) = self.switch_of(&action) else {
                     return Ok(());
+                };
+                let current = self.state(target);
+                match action.wanted(current) {
+                    Some(wanted) if wanted != current => self.drive(target, wanted),
+                    _ => Ok(()),
                 }
-                self.silence(target, wanted)
+            }
+            Action::Volume {
+                target,
+                mode,
+                percent,
+            } => {
+                let channel = self.volume_channel(target);
+                let amount = percent_to_volume(percent);
+                match mode {
+                    VolumeMode::Set => self.set_volume(channel, amount),
+                    _ if amount == 0 => Ok(()),
+                    VolumeMode::Up => self.change_volume(channel, i32::from(amount)),
+                    VolumeMode::Down => self.change_volume(channel, -i32::from(amount)),
+                }
+            }
+            Action::Profile { kind, name } => {
+                self.loads.push(Load { kind, name });
+                Ok(())
             }
             Action::Bank { bank } => {
                 self.mixer.bank = bank;
@@ -720,10 +852,9 @@ impl Hub {
     /// before the first one is what comes back.
     fn begin_hold(&mut self, button: Button, action: Action) -> Result<(), DeviceError> {
         let mut targets = Vec::new();
-        if let Action::Mute { target, .. } = action {
-            let target = self.silenced_by(target);
+        if let Some(target) = self.switch_of(&action) {
             if !self.before_holds.iter().any(|(held, _)| *held == target) {
-                self.before_holds.push((target, self.is_silenced(target)));
+                self.before_holds.push((target, self.state(target)));
             }
             targets.push(target);
         }
@@ -751,11 +882,11 @@ impl Hub {
             else {
                 continue;
             };
-            let (_, silenced) = self.before_holds.remove(at);
-            if self.is_silenced(target) != silenced {
-                self.set_silenced(target, silenced);
+            let (_, before) = self.before_holds.remove(at);
+            if self.state(target) != before {
+                self.put_state(target, before);
                 if sent.is_ok() {
-                    sent = self.send_silenced(target);
+                    sent = self.resend(target);
                 }
             }
         }
@@ -763,14 +894,18 @@ impl Hub {
     }
 
     /// Tells the device what the mixer says of a target.
-    fn send_silenced(&mut self, target: Silenced) -> Result<(), DeviceError> {
+    fn resend(&mut self, target: Switch) -> Result<(), DeviceError> {
         match target {
-            Silenced::Mic | Silenced::Channel(Channel::Mic) => {
+            Switch::Mic | Switch::Channel(Channel::Mic) => {
                 self.send_mic(self.mixer.mic_silenced())?;
             }
-            Silenced::Channel(channel) => {
+            Switch::Channel(channel) => {
                 let muted = self.mixer.muted[usize::from(channel.index())];
                 self.device.set_muted(channel, muted)?;
+            }
+            Switch::Route(input, _) => {
+                self.device
+                    .set_routing(input, self.mixer.routing[input as usize])?;
             }
         }
         self.send_lights()
@@ -815,6 +950,29 @@ impl Hub {
         Ok(())
     }
 
+    /// Does what the dials that were turned since the last reading are for.
+    /// Only the distance travelled counts, never where a dial is: a dial at
+    /// the end of its travel simply stops.
+    fn follow_wheels(&mut self, encoders: [i8; Wheel::COUNT]) -> Result<(), DeviceError> {
+        let Some(before) = self.encoders.replace(encoders) else {
+            return Ok(());
+        };
+        for wheel in Wheel::ALL {
+            let notches = i16::from(encoders[wheel.index()]) - i16::from(before[wheel.index()]);
+            if notches == 0 || notches.abs() > MAX_WHEEL_JUMP {
+                continue;
+            }
+            let Some(WheelAction::Volume { target, step }) = self.controls.wheel(wheel) else {
+                continue;
+            };
+            let channel = self.volume_channel(target);
+            let change =
+                (f32::from(notches) * f32::from(step) * f32::from(u8::MAX) / 100.0).round();
+            self.change_volume(channel, change as i32)?;
+        }
+        Ok(())
+    }
+
     /// Reads what changed on the device and returns the picture to draw.
     pub fn poll(&mut self) -> Result<Snapshot, DeviceError> {
         let status = self.device.status()?;
@@ -839,6 +997,7 @@ impl Hub {
 
         let now = self.clock.now();
         self.follow_buttons(status.pressed, now)?;
+        self.follow_wheels(status.encoders)?;
 
         let volume = |channel: Channel| self.mixer.volumes[usize::from(channel.index())];
         let muted = |channel: Channel| self.mixer.muted[usize::from(channel.index())];
@@ -910,6 +1069,8 @@ impl Hub {
     }
 }
 
+#[cfg(test)]
+mod audio_tests;
 #[cfg(test)]
 mod controls_tests;
 

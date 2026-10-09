@@ -187,6 +187,20 @@ impl<P: Port> Studio<P> {
     /// The picture to draw, with the profiles.
     pub fn poll(&mut self) -> Result<Snapshot, DeviceError> {
         let mut snapshot = self.station.poll()?;
+        // A button may ask for a profile. It is loaded once the reading is
+        // over, never in the middle of it, and without a word: what is not
+        // saved is lost. A name that is gone, or a file that cannot be read,
+        // changes nothing.
+        let loads = self.station.take_loads();
+        if !loads.is_empty() {
+            for load in loads {
+                let _ = self.select(load.kind, &load.name);
+            }
+            // The picture must show what was loaded.
+            if let Ok(loaded) = self.station.poll() {
+                snapshot = loaded;
+            }
+        }
         snapshot.profiles = self.view();
         Ok(snapshot)
     }
@@ -1325,5 +1339,205 @@ mod tests {
         assert!(studio.poll().unwrap().mic_off);
         hands.release(Button::MicMute);
         assert!(studio.poll().unwrap().mic_off);
+    }
+
+    const SWITCH_PAD: Button = Button::SamplerTopLeft;
+
+    fn to(kind: Kind, name: &str) -> Action {
+        Action::Profile {
+            kind,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn a_button_switches_the_profile_without_asking_and_drops_what_was_not_saved() {
+        let folder = Folder::new();
+        let (mut studio, hands) = launch_plugged(&folder);
+        studio.apply(headphones(70)).unwrap();
+        studio.run(SAVE).unwrap();
+        studio.run(save_as(Kind::Profile, "Radio")).unwrap();
+        studio.apply(headphones(120)).unwrap();
+        studio
+            .apply(give(
+                SWITCH_PAD,
+                Gesture::Short,
+                to(Kind::Profile, "Default"),
+            ))
+            .unwrap();
+        studio.run(SAVE).unwrap();
+        // Not saved.
+        studio.apply(headphones(33)).unwrap();
+        assert!(studio.unsaved());
+        studio.poll().unwrap();
+
+        hands.press(SWITCH_PAD);
+        let snapshot = studio.poll().unwrap();
+        assert_eq!(snapshot.profiles.active.profile, "Default");
+        assert!(!snapshot.profiles.unsaved && !studio.unsaved());
+        assert_eq!(hands.state().volumes[at(Channel::Headphones)], 70);
+        // The picture drawn is the one of what was loaded, not the one before.
+        assert_eq!(snapshot.channels[at(Channel::Headphones)].volume, Some(70));
+        assert!(
+            snapshot
+                .controls
+                .buttons
+                .iter()
+                .all(|b| { b.button != SWITCH_PAD || b.short.is_none() })
+        );
+        assert!(folder.text("state.toml").contains(r#"last = "Default""#));
+
+        // Held down, it switches once.
+        for _ in 0..3 {
+            assert_eq!(studio.poll().unwrap().profiles.active.profile, "Default");
+        }
+    }
+
+    #[test]
+    fn a_button_can_switch_one_piece_and_leave_the_others() {
+        let folder = Folder::new();
+        let (mut studio, hands) = launch_plugged(&folder);
+        studio.apply(Intent::SetDeEsser { amount: 20 }).unwrap();
+        studio.run(save_as(Kind::Mic, "Radio")).unwrap();
+        studio.run(select(Kind::Mic, "Default")).unwrap();
+        assert_eq!(hands.state().effects[&EffectKey::DeEsser], 0);
+        studio
+            .apply(give(SWITCH_PAD, Gesture::Short, to(Kind::Mic, "Radio")))
+            .unwrap();
+        // A mix change that is not saved stays where it is.
+        studio.apply(headphones(90)).unwrap();
+        studio.poll().unwrap();
+
+        hands.press(SWITCH_PAD);
+        let snapshot = studio.poll().unwrap();
+        assert_eq!(hands.state().effects[&EffectKey::DeEsser], 20);
+        assert_eq!(snapshot.profiles.active.mic, "Radio");
+        assert_eq!(snapshot.profiles.active.profile, "Default");
+        assert_eq!(hands.state().volumes[at(Channel::Headphones)], 90);
+        assert!(snapshot.profiles.dirty.mix);
+
+        // Another kind of piece, the controls: the buttons are the new ones.
+        studio.run(select(Kind::Controls, "Default")).unwrap();
+        studio.apply(headphones(80)).unwrap();
+        studio.run(save_as(Kind::Controls, "Live")).unwrap();
+        studio
+            .apply(give(
+                Button::Bleep,
+                Gesture::Short,
+                to(Kind::Controls, "Default"),
+            ))
+            .unwrap();
+        studio.poll().unwrap();
+        hands.release(SWITCH_PAD);
+        studio.poll().unwrap();
+        hands.press(Button::Bleep);
+        let snapshot = studio.poll().unwrap();
+        assert_eq!(snapshot.profiles.active.controls, "Default");
+        assert!(
+            snapshot
+                .controls
+                .buttons
+                .iter()
+                .all(|b| b.button != Button::Bleep || b.short.is_none())
+        );
+    }
+
+    #[test]
+    fn a_button_that_names_a_profile_that_is_gone_or_unreadable_changes_nothing() {
+        let folder = Folder::new();
+        let (mut studio, hands) = launch_plugged(&folder);
+        studio
+            .apply(give(SWITCH_PAD, Gesture::Short, to(Kind::Profile, "Nope")))
+            .unwrap();
+        studio
+            .apply(give(SWITCH_PAD, Gesture::Long, to(Kind::Mix, "Torn")))
+            .unwrap();
+        std::fs::write(folder.0.join("mixes/Torn.toml"), "this is [not").unwrap();
+        studio.apply(headphones(90)).unwrap();
+        studio.poll().unwrap();
+        let before = hands.state();
+
+        hands.press(SWITCH_PAD);
+        let snapshot = studio.poll().unwrap();
+        hands.release(SWITCH_PAD);
+        studio.poll().unwrap();
+        assert_eq!(snapshot.profiles.active.profile, "Default");
+        assert!(snapshot.profiles.unsaved, "what was changed is still there");
+        assert_eq!(hands.state().volumes, before.volumes);
+        assert_eq!(hands.state().muted, before.muted);
+    }
+
+    #[test]
+    fn a_profile_switched_by_a_button_while_another_is_held_leaves_the_held_one_clean() {
+        let folder = Folder::new();
+        let (mut studio, hands) = launch_plugged(&folder);
+        studio.apply(hold_to_mute_mic(Button::MicMute)).unwrap();
+        studio
+            .apply(give(SWITCH_PAD, Gesture::Short, to(Kind::Profile, "Other")))
+            .unwrap();
+        studio.run(SAVE).unwrap();
+        studio.run(save_as(Kind::Profile, "Other")).unwrap();
+        studio.run(select(Kind::Profile, "Default")).unwrap();
+        studio.poll().unwrap();
+
+        hands.press(Button::MicMute);
+        assert!(studio.poll().unwrap().mic_off);
+        hands.press(SWITCH_PAD);
+        let snapshot = studio.poll().unwrap();
+        assert_eq!(snapshot.profiles.active.profile, "Other");
+        assert!(
+            snapshot.mic_off,
+            "the finger is still on the microphone button"
+        );
+
+        // It finishes as it began, in the profile that was loaded meanwhile.
+        hands.release(Button::MicMute);
+        assert!(!studio.poll().unwrap().mic_off);
+        assert!(!hands.state().mic_input_muted);
+        hands.release(SWITCH_PAD);
+        let snapshot = studio.poll().unwrap();
+        assert_eq!(snapshot.profiles.active.profile, "Other");
+        assert!(!snapshot.mic_off);
+    }
+
+    fn hold_to_mute_mic(button: Button) -> Intent {
+        give(
+            button,
+            Gesture::Hold,
+            Action::Mute {
+                target: AudioTarget::Mic,
+                mode: MuteMode::Mute,
+            },
+        )
+    }
+
+    #[test]
+    fn two_profiles_that_switch_to_each_other_do_not_bounce_while_the_finger_stays() {
+        let folder = Folder::new();
+        let (mut studio, hands) = launch_plugged(&folder);
+        studio
+            .apply(give(SWITCH_PAD, Gesture::Short, to(Kind::Profile, "Back")))
+            .unwrap();
+        studio.run(SAVE).unwrap();
+        studio.run(save_as(Kind::Profile, "Back")).unwrap();
+        studio
+            .apply(give(
+                SWITCH_PAD,
+                Gesture::Short,
+                to(Kind::Profile, "Default"),
+            ))
+            .unwrap();
+        studio.run(SAVE).unwrap();
+        studio.run(select(Kind::Profile, "Default")).unwrap();
+        studio.poll().unwrap();
+
+        hands.press(SWITCH_PAD);
+        for _ in 0..4 {
+            assert_eq!(studio.poll().unwrap().profiles.active.profile, "Back");
+        }
+        hands.release(SWITCH_PAD);
+        studio.poll().unwrap();
+        hands.press(SWITCH_PAD);
+        assert_eq!(studio.poll().unwrap().profiles.active.profile, "Default");
     }
 }

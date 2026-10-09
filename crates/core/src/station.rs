@@ -5,7 +5,7 @@ use goxlr_hub_device::{Device, DeviceError, OpenError, VirtualHandle, open_virtu
 use goxlr_hub_protocol::{Button, Channel};
 use serde::Serialize;
 
-use crate::{Hub, Intent, MixerState, Settings, Snapshot};
+use crate::{Hub, Intent, Load, MixerState, Settings, Snapshot};
 
 /// Where real devices come from.
 pub trait Port: Send {
@@ -157,17 +157,30 @@ impl<P: Port> Station<P> {
 
     /// Does what the interface asked, on the device shown.
     pub fn apply(&mut self, intent: Intent) -> Result<(), DeviceError> {
-        // Only the virtual device is pressed from the screen. A button is
-        // always let go, whichever device is shown: a click that began on the
-        // virtual device may end after the real one came.
-        if let Intent::PressButton { button, down } = intent {
-            if !down {
-                self.hands.release(button);
-            } else if self.hardware.is_none() {
-                self.hands.press(button);
+        // Only the virtual device is pressed or turned from the screen. A
+        // button is always let go, whichever device is shown: a click that
+        // began on the virtual device may end after the real one came.
+        match intent {
+            Intent::PressButton { button, down } => {
+                if !down {
+                    self.hands.release(button);
+                } else if self.hardware.is_none() {
+                    self.hands.press(button);
+                }
+                return Ok(());
             }
-            return Ok(());
+            Intent::TurnWheel { wheel, notches } => {
+                if self.hardware.is_none() {
+                    self.hands.turn(wheel, notches);
+                }
+                return Ok(());
+            }
+            _ => {}
         }
+        let set_volume = match intent {
+            Intent::SetVolume { channel, .. } => Some(channel),
+            _ => None,
+        };
         if let Some(hub) = &mut self.hardware {
             match hub.apply(intent) {
                 Ok(()) => self.settings = hub.settings(),
@@ -176,7 +189,7 @@ impl<P: Port> Station<P> {
             return Ok(());
         }
         self.demo.apply(intent)?;
-        self.keep_from_demo(Some(intent));
+        self.keep_from_demo(set_volume);
         Ok(())
     }
 
@@ -215,14 +228,11 @@ impl<P: Port> Station<P> {
     /// What was set on the virtual device is kept for the real one, but for
     /// the volumes its faders show: they say nothing of a real device. A
     /// volume is only known once it was set.
-    fn keep_from_demo(&mut self, intent: Option<Intent>) {
+    fn keep_from_demo(&mut self, set_volume: Option<Channel>) {
         let mut settings = self.demo.settings();
         for channel in Channel::ALL {
             let at = usize::from(channel.index());
-            let set = matches!(
-                intent,
-                Some(Intent::SetVolume { channel: set, .. }) if set == channel
-            );
+            let set = set_volume == Some(channel);
             if self.settings.mixer.volumes[at].is_none() && !set {
                 settings.mixer.volumes[at] = None;
             }
@@ -267,6 +277,16 @@ impl<P: Port> Station<P> {
         // Buttons pressed on the virtual device change what is set.
         self.keep_from_demo(None);
         Ok(self.stamp(snapshot))
+    }
+
+    /// The profiles the buttons asked for during the last reading, from
+    /// whichever device read them.
+    pub(crate) fn take_loads(&mut self) -> Vec<Load> {
+        let mut loads = self.demo.take_loads();
+        if let Some(hub) = &mut self.hardware {
+            loads.extend(hub.take_loads());
+        }
+        loads
     }
 
     fn stamp(&self, mut snapshot: Snapshot) -> Snapshot {
@@ -1170,6 +1190,84 @@ mod tests {
                 .controls
                 .action(Button::SamplerTopLeft, Gesture::Hold)
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn a_cable_pulled_during_a_hold_on_a_route_leaves_nothing_cut() {
+        let (first, before) = real_device();
+        let (second, after) = real_device();
+        let (mut station, _) = station([Ok(first), Ok(second)]);
+        station.scan();
+        station.poll().unwrap();
+        station
+            .apply(Intent::SetGesture {
+                button: Button::SamplerTopLeft,
+                gesture: Gesture::Hold,
+                action: Some(Action::Route {
+                    input: RoutingInput::Music,
+                    output: RoutingOutput::BroadcastMix,
+                    mode: crate::RouteMode::Off,
+                }),
+            })
+            .unwrap();
+        before.hands.press(Button::SamplerTopLeft);
+        station.poll().unwrap();
+        assert!(!routed(&before, RoutingInput::Music).contains(RoutingOutput::BroadcastMix));
+
+        before.unplugged.store(true, Ordering::Relaxed);
+        assert_eq!(station.poll().unwrap().device.kind, "virtual");
+        assert_eq!(station.settings().mixer.routing, crate::default_routing());
+
+        // The device that comes back is sent the routing as it was, and is
+        // not pressed.
+        station.scan();
+        assert_eq!(station.connection(), &Connection::Hardware);
+        assert!(routed(&after, RoutingInput::Music).contains(RoutingOutput::BroadcastMix));
+        station.poll().unwrap();
+        assert!(routed(&after, RoutingInput::Music).contains(RoutingOutput::BroadcastMix));
+    }
+
+    #[test]
+    fn a_dial_is_turned_from_the_screen_on_the_virtual_device_only() {
+        let (mut virtual_station, _) = station([]);
+        virtual_station.poll().unwrap();
+        virtual_station
+            .apply(Intent::SetWheel {
+                wheel: goxlr_hub_protocol::Wheel::Pitch,
+                action: Some(crate::WheelAction::Volume {
+                    target: AudioTarget::Channel {
+                        channel: Channel::Headphones,
+                    },
+                    step: 4,
+                }),
+            })
+            .unwrap();
+        let turn = |notches| Intent::TurnWheel {
+            wheel: goxlr_hub_protocol::Wheel::Pitch,
+            notches,
+        };
+        virtual_station.apply(turn(-3)).unwrap();
+        let snapshot = virtual_station.poll().unwrap();
+        let headphones = snapshot.channels[usize::from(Channel::Headphones.index())];
+        assert_eq!(headphones.volume, Some(224));
+
+        // The real device is not turned by a click on a screen.
+        let (device, bench) = real_device();
+        let (mut station, _) = station([Ok(device)]);
+        station.scan();
+        station.poll().unwrap();
+        let before = bench.received.lock().unwrap().len();
+        station.apply(turn(5)).unwrap();
+        station.poll().unwrap();
+        assert_eq!(bench.hands.state().encoders, [0; 4]);
+        let received = bench.received.lock().unwrap();
+        assert!(
+            received[before..]
+                .iter()
+                .all(|request| matches!(request, Request::GetStatus | Request::GetMicLevel)),
+            "{:?}",
+            &received[before..]
         );
     }
 }
