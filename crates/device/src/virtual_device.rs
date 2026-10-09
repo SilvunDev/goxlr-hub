@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use goxlr_hub_protocol::{
     Button, ButtonLights, ButtonSet, Channel, EffectKey, Fader, FirmwareInfo, MicParamKey, MicType,
-    OutputSet, Packet, Request, RoutingInput, SerialInfo, Side, Status, Version, encode_mic_level,
+    OutputSet, Packet, Request, RoutingInput, SerialInfo, Side, Status, Version, Wheel,
+    encode_mic_level,
 };
 
 use crate::{DeviceError, DeviceKind, Link, Session};
@@ -258,6 +259,14 @@ impl VirtualHandle {
     pub fn release(&self, button: Button) {
         lock(&self.state).pressed.remove(button);
     }
+
+    /// Turns a dial by some notches, positive or negative. A dial stops at
+    /// the ends of what it can report.
+    pub fn turn(&self, wheel: Wheel, notches: i8) {
+        let mut state = lock(&self.state);
+        let at = &mut state.encoders[wheel.index()];
+        *at = at.saturating_add(notches);
+    }
 }
 
 /// Opens a session on a new virtual device.
@@ -378,6 +387,20 @@ mod tests {
         hands.release(Button::Fader2Mute);
         hands.release(Button::Bleep);
         assert_eq!(device.status().unwrap().pressed, ButtonSet::default());
+    }
+
+    #[test]
+    fn a_dial_turned_by_hand_shows_where_it_is() {
+        let (mut device, hands) = open_virtual().unwrap();
+        assert_eq!(device.status().unwrap().encoders, [0; 4]);
+        hands.turn(Wheel::Gender, 3);
+        hands.turn(Wheel::Echo, -2);
+        hands.turn(Wheel::Gender, 1);
+        assert_eq!(device.status().unwrap().encoders, [0, 4, 0, -2]);
+        // It stops at the end of what can be told.
+        hands.turn(Wheel::Pitch, 100);
+        hands.turn(Wheel::Pitch, 100);
+        assert_eq!(device.status().unwrap().encoders[0], i8::MAX);
     }
 
     #[test]
