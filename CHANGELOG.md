@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/SilvunDev/goxlr-hub/compare/v0.1.0...v0.2.0) (2026-10-09)
+
+
+### Features
+
+* choose what each button does, per gesture ([#40](https://github.com/SilvunDev/goxlr-hub/issues/40)) ([9aa7b42](https://github.com/SilvunDev/goxlr-hub/commit/9aa7b42f27b99840661ca3a787af4cd3155f543d))
+
 ## 0.1.0 (2026-10-07)
 
 
