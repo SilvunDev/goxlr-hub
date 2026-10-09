@@ -227,13 +227,15 @@ export const en = {
       none: 'Nothing saved yet',
     },
     wheel: {
-      hint: 'A dial can set the volume of a track. The app follows how far you turn it, and puts the dial back to the middle of its travel as you go, so that it never stops at the end. For about a second after you give a dial a job, it is being measured and does not answer yet.',
+      hint: 'A dial can set the volume of a track. Where the dial stands in its travel is the volume: the bottom is 0%, the top is 100%, and the ring of lights of the dial shows it. For about a second after you give a dial a job, it is being measured and does not answer yet.',
       action: 'What the dial does',
       none: 'Nothing',
       volume: 'Volume of a track',
-      step: 'Each notch moves the volume by',
+      step: 'Each notch moves the volume by about {step}%.',
+      stepUnknown:
+        'Each notch moves the volume by 100% divided by the number of notches of the dial, which is measured when it is given a job.',
       unknown:
-        'Set this volume once first, in Channels or with a “Set to” button, so that the dial follows it. Until then the dial does nothing.',
+        'Set this volume once first, in Channels or with a “Set to” button, so that the dial follows it. Until then the dial is left alone.',
       choose: 'Choose a dial to set what it does.',
       turnDown: 'Turn {wheel} down one notch',
       turnUp: 'Turn {wheel} up one notch',
@@ -242,11 +244,14 @@ export const en = {
         title: 'What the app sees',
         reading: 'The device reports {reading}.',
         idle: 'No job: the app leaves this dial alone.',
+        unknownVolume:
+          'The volume it sets is not known yet: the dial is left alone until you set it once.',
         waiting: 'Waiting for the next reading.',
         measuring: 'Measuring its travel (last asked: {asked}). Do not touch it for a moment.',
-        ready: 'Ready: its travel goes from {low} to {high}.',
+        syncing: 'Putting the dial where the volume is.',
+        ready: 'Ready: its travel goes from {low} to {high}, notch {notch} of {notches}.',
         followOnly:
-          'Followed by how far it turns only: its travel could not be measured or the dial put back, so it may stop at the end.',
+          'Followed by how far it turns only, about {step}% a notch: its travel could not be measured, or the device did not put the dial where the volume is. It may stop at the end of its travel.',
         refused: 'The device did not hear the last command to put it somewhere.',
       },
     },
@@ -286,7 +291,10 @@ export const en = {
         mic: 'Mic {name}',
         controls: 'Controls {name}',
       },
-      wheel: 'Volume of {target}, {step}% a notch',
+      wheel: 'Sets {target}',
+      wheelLive: '{target} {percent}%',
+      wheelNotch: 'notch {notch} of {notches}',
+      wheelUnknown: '{target}: not set yet',
     },
     holdNote:
       'A hold reacts the moment you press, so this button has no short, long or double press.',

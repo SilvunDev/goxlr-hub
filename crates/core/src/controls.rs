@@ -159,9 +159,20 @@ impl Action {
     rename_all_fields = "camelCase"
 )]
 pub enum WheelAction {
-    /// Each notch changes the volume of a track by `step` percent of the
-    /// whole range.
-    Volume { target: AudioTarget, step: u8 },
+    /// The place of the dial in its travel is the volume of a track. `step`
+    /// is what a notch moves it by, in percent, for a dial that cannot be put
+    /// where the volume is and is only followed by how far it turns; a dial
+    /// that can be is not given a step to choose, the travel gives it. Files
+    /// that were written with a step, or without, are read all the same.
+    Volume {
+        target: AudioTarget,
+        #[serde(default = "starting_step")]
+        step: u8,
+    },
+}
+
+fn starting_step() -> u8 {
+    WHEEL_STEP_PERCENT.1
 }
 
 impl WheelAction {
@@ -962,6 +973,32 @@ mod tests {
         ] {
             assert!(toml::from_str::<ControlsFile>(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_dial_is_read_with_the_step_that_was_chosen_or_without_one() {
+        let text = r#"
+            [wheels.pitch]
+            type = "volume"
+            target = { type = "channel", channel = "headphones" }
+            step = 7
+
+            [wheels.gender]
+            type = "volume"
+            target = { type = "channel", channel = "headphones" }
+        "#;
+        let controls = Controls::from_file(toml::from_str(text).unwrap());
+        let volume = |step| {
+            Some(WheelAction::Volume {
+                target: AudioTarget::Channel {
+                    channel: Channel::Headphones,
+                },
+                step,
+            })
+        };
+        // The step that was chosen is kept for a dial that is only followed.
+        assert_eq!(controls.wheel(Wheel::Pitch), volume(7));
+        assert_eq!(controls.wheel(Wheel::Gender), volume(WHEEL_STEP_PERCENT.1));
     }
 
     #[test]

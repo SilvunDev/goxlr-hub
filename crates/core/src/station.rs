@@ -1298,21 +1298,28 @@ mod tests {
         assert_eq!(snapshot.channels[channel].volume, Some(255));
         assert_eq!(virtual_station.settings().mixer.volumes[channel], None);
 
-        // Set once, it is known: the dial follows, and what it sets is kept.
+        // Set once, it is known: the dial is measured and put where the volume
+        // is, then the hand sets the volume, and what it sets is kept.
         virtual_station
             .apply(Intent::SetVolume {
                 channel: Channel::Headphones,
                 volume: 100,
             })
             .unwrap();
+        for _ in 0..80 {
+            virtual_station.poll().unwrap();
+        }
+        let snapshot = virtual_station.poll().unwrap();
+        assert_eq!(snapshot.channels[channel].volume, Some(100));
         virtual_station.apply(turn(-3)).unwrap();
         let snapshot = virtual_station.poll().unwrap();
-        assert_eq!(snapshot.channels[channel].volume, Some(69));
-        assert_eq!(virtual_station.settings().mixer.volumes[channel], Some(69));
+        // The dial was put at -5 of -24 to 24; three notches down is -8.
+        assert_eq!(snapshot.channels[channel].volume, Some(85));
+        assert_eq!(virtual_station.settings().mixer.volumes[channel], Some(85));
 
         // That is what the real device is brought to, and nothing else.
         virtual_station.scan();
-        assert_eq!(bench.volumes_received(), [(Channel::Headphones, 69)]);
+        assert_eq!(bench.volumes_received(), [(Channel::Headphones, 85)]);
     }
 
     #[test]

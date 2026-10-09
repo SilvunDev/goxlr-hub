@@ -947,6 +947,8 @@ describe('Controls', () => {
   });
 
   describe('the dials', () => {
+    type Seen = NonNullable<Snapshot['dials']>[number];
+
     const dial = (
       wheel: WheelView['wheel'],
       step = 4,
@@ -955,6 +957,21 @@ describe('Controls', () => {
         channel: 'headphones',
       },
     ): WheelView => ({ wheel, action: { type: 'volume', target, step } });
+
+    /** What the app sees of a dial. */
+    const seen = (wheel: Seen['wheel'], state: Seen['state'], more: Partial<Seen> = {}): Seen => ({
+      wheel,
+      reading: 7,
+      state,
+      low: null,
+      high: null,
+      percent: null,
+      notch: null,
+      notches: null,
+      asked: null,
+      refused: false,
+      ...more,
+    });
 
     function withDials(...given: WheelView[]): ControlsView {
       return {
@@ -965,24 +982,58 @@ describe('Controls', () => {
       };
     }
 
-    const dialCell = (name: string) => within(screen.getByRole('region', { name: 'Dials' }))
-      .getByRole('button', { name: new RegExp(`^${name} ?:`) });
+    const dialCell = (name: string) =>
+      within(screen.getByRole('region', { name: 'Dials' })).getByRole('button', {
+        name: new RegExp(`^${name} ?:`),
+      });
+
+    const labels = () =>
+      block('Dials')
+        .getAllByRole('button', { name: /dial ?:/ })
+        .map((c) => c.getAttribute('aria-label'));
 
     it('shows the four dials with what each does', async () => {
       await open(snapshot({ controls: withDials(dial('reverb', 6, { type: 'mic' })) }));
-      const cells = block('Dials').getAllByRole('button', { name: /dial ?:/ });
-      expect(cells.map((c) => c.getAttribute('aria-label'))).toEqual([
+      expect(labels()).toEqual([
         'Pitch dial: Nothing',
         'Gender dial: Nothing',
-        'Reverb dial: Volume of mic, 6% a notch',
+        'Reverb dial: Sets mic',
         'Echo dial: Nothing',
       ]);
     });
 
+    it('shows the volume a dial sets and where the dial is, live', async () => {
+      const controls = withDials(dial('pitch'), dial('gender'), dial('reverb', 4, { type: 'mic' }));
+      await open(
+        snapshot({
+          controls,
+          dials: [
+            seen('pitch', 'ready', { low: -24, high: 24, percent: 51, notch: 25, notches: 48 }),
+            seen('gender', 'unknownVolume'),
+            seen('reverb', 'measuring', { percent: 80 }),
+          ],
+        }),
+      );
+      expect(labels()).toEqual([
+        'Pitch dial: Headphones 51% · notch 25 of 48',
+        'Gender dial: Headphones: not set yet',
+        'Reverb dial: mic 80%',
+        'Echo dial: Nothing',
+      ]);
+
+      // It moves as the device says.
+      await report(
+        snapshot({
+          controls,
+          dials: [seen('pitch', 'ready', { low: -24, high: 24, percent: 52, notch: 26, notches: 48 })],
+        }),
+      );
+      expect(labels()[0]).toBe('Pitch dial: Headphones 52% · notch 26 of 48');
+    });
+
     it('copes with a state that tells no dials', async () => {
       await open();
-      const cells = block('Dials').getAllByRole('button', { name: /dial ?:/ });
-      expect(cells.map((c) => c.getAttribute('aria-label'))).toEqual([
+      expect(labels()).toEqual([
         'Pitch dial: Nothing',
         'Gender dial: Nothing',
         'Reverb dial: Nothing',
@@ -990,7 +1041,7 @@ describe('Controls', () => {
       ]);
     });
 
-    it('gives a dial a volume, then a track and a step', async () => {
+    it('gives a dial a volume and a track, and says how far a notch goes', async () => {
       await open(snapshot({ controls: withDials() }));
       expect(dialCell('Pitch dial').getAttribute('aria-pressed')).toBe('false');
       await fireEvent.click(dialCell('Pitch dial'));
@@ -1012,7 +1063,10 @@ describe('Controls', () => {
         action: { type: 'volume', target: { type: 'channel', channel: 'headphones' }, step: 4 },
       });
 
+      // Not measured yet: the step is not known. There is no step to choose.
       await report(snapshot({ controls: withDials(dial('pitch')) }));
+      expect(within(screen.getByRole('region', { name: 'Pitch dial' })).queryByRole('slider')).toBeNull();
+      expect(screen.getByText(/Each notch moves the volume by 100% divided by/)).toBeTruthy();
       const target = screen.getByRole('combobox', { name: 'What to act on' }) as HTMLSelectElement;
       expect(target.value).toBe('channel:headphones');
       await fireEvent.change(target, { target: { value: 'fader:b' } });
@@ -1021,17 +1075,33 @@ describe('Controls', () => {
         wheel: 'pitch',
         action: { type: 'volume', target: { type: 'faderTrack', fader: 'b' }, step: 4 },
       });
-      const step = screen.getByRole('slider', { name: 'Each notch moves the volume by' });
-      expect((step as HTMLInputElement).value).toBe('4');
-      expect(step.getAttribute('max')).toBe('10');
-      await fireEvent.input(step, { target: { value: '7' } });
-      expect(feed.sent.at(-1)).toMatchObject({ action: { step: 7 } });
+
+      // Measured: the real step, the whole volume over the notches.
+      await report(
+        snapshot({
+          controls: withDials(dial('pitch')),
+          dials: [seen('pitch', 'ready', { low: -24, high: 24, percent: 51, notch: 25, notches: 48 })],
+        }),
+      );
+      expect(screen.getByText('Each notch moves the volume by about 2.1%.')).toBeTruthy();
+      expect(screen.getByText(/the bottom is 0%, the top is 100%/)).toBeTruthy();
       expect(screen.getByText(/Set this volume once first/)).toBeTruthy();
 
       await fireEvent.change(screen.getByRole('combobox', { name: 'What the dial does' }), {
         target: { value: 'none' },
       });
       expect(feed.sent.at(-1)).toEqual({ type: 'setWheel', wheel: 'pitch', action: null });
+    });
+
+    it('says the step a travel of 24 notches gives', async () => {
+      await open(
+        snapshot({
+          controls: withDials(dial('reverb')),
+          dials: [seen('reverb', 'ready', { low: 0, high: 24, percent: 10, notch: 2, notches: 24 })],
+        }),
+      );
+      await fireEvent.click(dialCell('Reverb dial'));
+      expect(screen.getByText('Each notch moves the volume by about 4.2%.')).toBeTruthy();
     });
 
     it('turns a dial of the virtual device from the screen, and never a real one', async () => {
@@ -1048,27 +1118,12 @@ describe('Controls', () => {
     });
 
     it('says what the app sees of a dial, so that a dial that does not answer can be understood', async () => {
-      type Seen = NonNullable<Snapshot['dials']>[number];
-      const seen = (
-        wheel: Seen['wheel'],
-        state: Seen['state'],
-        more: Partial<Seen> = {},
-      ): Seen => ({
-        wheel,
-        reading: 7,
-        state,
-        low: null,
-        high: null,
-        asked: null,
-        refused: false,
-        ...more,
-      });
       const controls = withDials(dial('pitch'), dial('gender'));
       await open(
         snapshot({
           controls,
           dials: [
-            seen('pitch', 'ready', { low: -24, high: 24 }),
+            seen('pitch', 'ready', { low: -24, high: 24, percent: 51, notch: 25, notches: 48 }),
             seen('gender', 'measuring', { asked: 16 }),
           ],
         }),
@@ -1076,7 +1131,9 @@ describe('Controls', () => {
       await fireEvent.click(dialCell('Pitch dial'));
       const panel = within(screen.getByRole('region', { name: 'Pitch dial' }));
       expect(panel.getByText('The device reports 7.')).toBeTruthy();
-      expect(panel.getByText('Ready: its travel goes from -24 to 24.')).toBeTruthy();
+      expect(
+        panel.getByText('Ready: its travel goes from -24 to 24, notch 25 of 48.'),
+      ).toBeTruthy();
 
       await fireEvent.click(dialCell('Gender dial'));
       expect(screen.getByText(/Measuring its travel \(last asked: 16\)/)).toBeTruthy();
@@ -1084,11 +1141,16 @@ describe('Controls', () => {
       await report(
         snapshot({
           controls,
-          dials: [seen('pitch', 'ready'), seen('gender', 'followOnly', { refused: true })],
+          dials: [seen('pitch', 'syncing'), seen('gender', 'followOnly', { refused: true })],
         }),
       );
-      expect(screen.getByText(/Followed by how far it turns only/)).toBeTruthy();
+      expect(screen.getByText(/Followed by how far it turns only, about 4% a notch/)).toBeTruthy();
       expect(screen.getByText(/did not hear the last command/)).toBeTruthy();
+      await fireEvent.click(dialCell('Pitch dial'));
+      expect(screen.getByText('Putting the dial where the volume is.')).toBeTruthy();
+
+      await report(snapshot({ controls, dials: [seen('pitch', 'unknownVolume')] }));
+      expect(screen.getByText(/The volume it sets is not known yet/)).toBeTruthy();
 
       // A state that tells nothing of the dials shows nothing of them.
       await report(snapshot({ controls }));
@@ -1096,7 +1158,14 @@ describe('Controls', () => {
     });
 
     it('speaks French', async () => {
-      await open(snapshot({ controls: withDials(dial('gender', 3)) }));
+      await open(
+        snapshot({
+          controls: withDials(dial('gender', 3)),
+          dials: [
+            seen('gender', 'ready', { low: -24, high: 24, percent: 51, notch: 25, notches: 48 }),
+          ],
+        }),
+      );
       i18n.setLocale('fr');
       await tick();
       expect(screen.getByRole('region', { name: 'Molettes' })).toBeTruthy();
@@ -1106,12 +1175,13 @@ describe('Controls', () => {
       );
       expect(cells.map((c) => c.getAttribute('aria-label'))).toEqual([
         'Molette hauteur : Rien',
-        'Molette genre : Règle Casque, 3 % par cran',
+        'Molette genre : Casque 51 % · cran 25 sur 48',
         'Molette réverbe : Rien',
         'Molette écho : Rien',
       ]);
       await fireEvent.click(cells[1]);
       expect(screen.getByText(/Réglez ce volume une première fois/)).toBeTruthy();
+      expect(screen.getByText('Chaque cran déplace le volume d’environ 2,1 %.')).toBeTruthy();
     });
   });
 

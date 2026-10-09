@@ -227,13 +227,15 @@ export const fr: Messages = {
       none: 'Rien d’enregistré pour l’instant',
     },
     wheel: {
-      hint: 'Une molette peut régler le volume d’une piste. L’appli suit de combien vous la tournez et remet la molette au milieu de sa course au fur et à mesure, pour qu’elle ne bute jamais en bout de course. Pendant environ une seconde après qu’on lui a donné un rôle, la molette est mesurée et ne répond pas encore.',
+      hint: 'Une molette peut régler le volume d’une piste. La place de la molette dans sa course est le volume : le bas est 0 %, le haut est 100 %, et l’anneau de voyants de la molette le montre. Pendant environ une seconde après qu’on lui a donné un rôle, la molette est mesurée et ne répond pas encore.',
       action: 'Ce que fait la molette',
       none: 'Rien',
       volume: 'Volume d’une piste',
-      step: 'Chaque cran déplace le volume de',
+      step: 'Chaque cran déplace le volume d’environ {step} %.',
+      stepUnknown:
+        'Chaque cran déplace le volume de 100 % divisé par le nombre de crans de la molette, qui est mesuré quand on lui donne un rôle.',
       unknown:
-        'Réglez ce volume une première fois (dans Pistes audio, ou avec une touche « Mettre à ») pour que la molette le suive. Tant qu’il est inconnu, la molette ne fait rien.',
+        'Réglez ce volume une première fois (dans Pistes audio, ou avec une touche « Mettre à ») pour que la molette le suive. Tant qu’il est inconnu, la molette est laissée tranquille.',
       choose: 'Choisissez une molette pour régler ce qu’elle fait.',
       turnDown: 'Tourner {wheel} d’un cran vers le bas',
       turnUp: 'Tourner {wheel} d’un cran vers le haut',
@@ -242,12 +244,15 @@ export const fr: Messages = {
         title: 'Ce que voit l’appli',
         reading: 'L’appareil indique {reading}.',
         idle: 'Pas de rôle : l’appli laisse cette molette tranquille.',
+        unknownVolume:
+          'Le volume qu’elle règle n’est pas encore connu : la molette est laissée tranquille tant que vous ne l’avez pas réglé une fois.',
         waiting: 'En attente de la prochaine lecture.',
         measuring:
           'Mesure de sa course (dernière demande : {asked}). Ne la touchez pas un instant.',
-        ready: 'Prête : sa course va de {low} à {high}.',
+        syncing: 'La molette est mise là où est le volume.',
+        ready: 'Prête : sa course va de {low} à {high}, cran {notch} sur {notches}.',
         followOnly:
-          'Suivie seulement par la distance dont on la tourne : sa course n’a pas pu être mesurée ou la molette remise au milieu, elle peut donc buter en bout de course.',
+          'Suivie seulement par la distance dont on la tourne, environ {step} % par cran : sa course n’a pas pu être mesurée, ou l’appareil n’a pas mis la molette là où est le volume. Elle peut buter en bout de course.',
         refused: 'L’appareil n’a pas entendu la dernière commande qui la place quelque part.',
       },
     },
@@ -287,7 +292,10 @@ export const fr: Messages = {
         mic: 'Micro {name}',
         controls: 'Touches {name}',
       },
-      wheel: 'Règle {target}, {step} % par cran',
+      wheel: 'Règle {target}',
+      wheelLive: '{target} {percent} %',
+      wheelNotch: 'cran {notch} sur {notches}',
+      wheelUnknown: '{target} : pas encore réglé',
     },
     holdNote:
       'Un maintien réagit dès que vous appuyez : ce bouton n’a donc ni appui court, ni long, ni double.',

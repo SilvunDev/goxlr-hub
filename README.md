@@ -47,12 +47,18 @@ other gesture. The buttons work as long as the app runs, window closed or not.
 
 A button that switches profile does it at once and does not ask: changes that
 are not saved are lost, and the Controls screen says so when the action is
-chosen. A dial is followed by how far it turns, never by where it stands: the
-app puts it back to the middle of its travel as you go, so that it never stops
-at the end of it, and feels for that travel for about a second when the dial
-is given a job. A volume the app does not know yet (a track on no fader that
-was never set) is left alone by a button or a dial that raises or lowers it:
-set it once first.
+chosen. The place of a dial in its travel is the volume it sets: the bottom is
+0%, the top is 100%, the ring of lights of the dial shows it, and the dial
+stops by itself at both ends. Each notch moves the volume by 100% divided by
+the number of notches of the travel, which the app measures for about a second
+when the dial is given a job. When the volume changes by other means (the
+screen, a button, a fader, a profile, another dial), the app puts the dial
+where the new volume is. A dial that the device does not put where the volume
+is is only followed by how far it turns, a few percent a notch, and can then
+stop at the end of its travel; the Controls screen says so. A volume the app
+does not know yet (a track on no fader that was never set) is left alone by a
+button that raises or lowers it, and its dial is not touched: set it once
+first.
 
 Each file says which format it is written in. A file made by a newer version
 of the app is neither loaded nor overwritten by an older one. The first time

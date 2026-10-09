@@ -14,10 +14,11 @@ use goxlr_hub_protocol::{
 use serde_json::json;
 
 use crate::controls_tests::{Deaf, OTHER_PAD, PAD, after, give, muted, timed_hub, track};
+use crate::dials::{place, volume_at};
 use crate::gestures::ManualClock;
 use crate::{
     Action, AudioTarget, Gesture, Hub, Intent, Kind, Load, MuteMode, RouteMode, Settings,
-    VolumeMode, WHEEL_STEP_PERCENT, WheelAction, default_routing,
+    VolumeMode, WheelAction, default_routing,
 };
 
 const MUSIC: RoutingInput = RoutingInput::Music;
@@ -552,19 +553,26 @@ fn wheel_to(channel: Channel, step: u8) -> Intent {
     wheel_of(Wheel::Pitch, channel, step)
 }
 
-/// Lets the dials that have a job find their travel, as they do when they are
-/// given one.
+/// Lets the dials that have a job find their travel and go where their volume
+/// is, as they do when they are given one.
 fn ready(hub: &mut Hub, clock: &ManualClock) {
     for _ in 0..400 {
         if hub.dials_are_ready() {
-            // The dial was just put in the middle: one more reading sees it
-            // there.
+            // One more reading sees the dial where it was put.
             after(hub, clock, 50);
             return;
         }
         after(hub, clock, 50);
     }
     panic!("the dials never got ready");
+}
+
+/// Readings for the dials to notice that a volume changed, then be ready.
+fn settled(hub: &mut Hub, clock: &ManualClock) {
+    for _ in 0..3 {
+        after(hub, clock, 50);
+    }
+    ready(hub, clock);
 }
 
 /// A hub, its device and its clock, with the pitch dial given the volume of
@@ -577,46 +585,227 @@ fn with_a_dial(step: u8) -> (Hub, VirtualHandle, ManualClock) {
     (hub, hands, clock)
 }
 
-#[test]
-fn a_dial_turned_sets_the_volume_it_was_given_notch_by_notch() {
-    let (mut hub, hands, clock) = with_a_dial(4);
+/// Where a dial is on the device, and how far it can go there.
+fn dial_at(hands: &VirtualHandle, wheel: Wheel) -> (i8, (i8, i8)) {
+    let state = hands.state();
+    (
+        state.encoders[wheel.index()],
+        state.encoder_ranges[wheel.index()],
+    )
+}
 
-    hands.turn(Wheel::Pitch, 3);
-    after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 131);
-    hands.turn(Wheel::Pitch, -5);
-    after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 80);
-    // Still: nothing more.
-    after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 80);
-    assert_eq!(
-        hub.mixer().volumes[usize::from(Channel::Headphones.index())],
-        Some(80)
-    );
+/// Whether a dial stands where the volume says.
+fn says(hands: &VirtualHandle, wheel: Wheel, volume: u8) -> bool {
+    let (at, (low, high)) = dial_at(hands, wheel);
+    at == place(low, high, volume)
 }
 
 #[test]
-fn a_dial_is_given_time_to_find_its_travel_and_is_put_in_the_middle_of_it() {
-    let (device, hands) = open_virtual().unwrap();
-    // The dial is far from the middle when the app meets it.
-    hands.turn(Wheel::Pitch, 17);
-    let clock = ManualClock::default();
-    let mut hub = Hub::connect(Box::new(device)).unwrap();
-    hub.clock = Box::new(clock.clone());
-    set_headphones(&mut hub, 100);
-    hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
-    hub.poll().unwrap();
-    assert!(!hub.dials_are_ready());
+fn a_dial_given_a_job_is_put_where_the_volume_is_and_the_volume_is_not_changed() {
+    for wheel in Wheel::ALL {
+        for volume in [0u8, 1, 100, 128, 254, 255] {
+            let (mut hub, hands, clock) = timed_hub();
+            set_headphones(&mut hub, volume);
+            hub.apply(wheel_of(wheel, Channel::Headphones, 4)).unwrap();
+            let seen = hub.poll().unwrap();
+            assert_eq!(seen.dials[wheel.index()].state, "measuring");
+            ready(&mut hub, &clock);
+            assert!(says(&hands, wheel, volume), "{wheel:?} at {volume}");
+            assert_eq!(volume_of(&hands, Channel::Headphones), volume);
+            assert_eq!(
+                hub.mixer().volumes[usize::from(Channel::Headphones.index())],
+                Some(volume)
+            );
+        }
+    }
+}
 
-    // Where it stands is not followed, nor what it is asked to do meanwhile.
+#[test]
+fn the_hand_sets_the_volume_and_a_dial_stops_at_zero_and_a_hundred_percent() {
+    for wheel in Wheel::ALL {
+        let (mut hub, hands, clock) = timed_hub();
+        set_headphones(&mut hub, 100);
+        hub.apply(wheel_of(wheel, Channel::Headphones, 4)).unwrap();
+        ready(&mut hub, &clock);
+        let (_, (low, high)) = dial_at(&hands, wheel);
+
+        let mut last = volume_of(&hands, Channel::Headphones);
+        for _ in 0..70 {
+            hands.turn(wheel, 1);
+            after(&mut hub, &clock, 50);
+            let now = volume_of(&hands, Channel::Headphones);
+            assert!(now >= last, "{wheel:?} going up");
+            assert_eq!(now, volume_at(low, high, dial_at(&hands, wheel).0));
+            last = now;
+        }
+        assert_eq!(last, 255, "{wheel:?}");
+        assert_eq!(dial_at(&hands, wheel).0, high);
+        // It stays there, and the dial is not put anywhere else.
+        for _ in 0..5 {
+            hands.turn(wheel, 3);
+            after(&mut hub, &clock, 50);
+        }
+        assert_eq!(
+            (
+                volume_of(&hands, Channel::Headphones),
+                dial_at(&hands, wheel).0
+            ),
+            (255, high)
+        );
+
+        for _ in 0..70 {
+            hands.turn(wheel, -1);
+            after(&mut hub, &clock, 50);
+            let now = volume_of(&hands, Channel::Headphones);
+            assert!(now <= last, "{wheel:?} going down");
+            last = now;
+        }
+        assert_eq!(last, 0, "{wheel:?}");
+        assert_eq!(dial_at(&hands, wheel).0, low);
+        hands.turn(wheel, -5);
+        after(&mut hub, &clock, 50);
+        assert_eq!(volume_of(&hands, Channel::Headphones), 0);
+    }
+}
+
+#[test]
+fn a_volume_changed_by_other_means_puts_the_dial_where_it_says() {
+    let (mut hub, hands, clock) = with_a_dial(4);
+    let headphones = |hands: &VirtualHandle| volume_of(hands, Channel::Headphones);
+
+    // The screen.
+    set_headphones(&mut hub, 30);
+    settled(&mut hub, &clock);
+    assert!(says(&hands, Wheel::Pitch, 30));
+    assert_eq!(headphones(&hands), 30);
+
+    // A button, set, raised and lowered.
+    let h = |mode, percent| volume(Channel::Headphones, mode, percent);
+    give(&mut hub, PAD, Gesture::Short, h(VolumeMode::Set, 80));
+    give(&mut hub, OTHER_PAD, Gesture::Short, h(VolumeMode::Down, 30));
+    tap(&mut hub, &hands, &clock, PAD);
+    settled(&mut hub, &clock);
+    assert_eq!(headphones(&hands), 204);
+    assert!(says(&hands, Wheel::Pitch, 204));
+    tap(&mut hub, &hands, &clock, OTHER_PAD);
+    settled(&mut hub, &clock);
+    assert_eq!(headphones(&hands), 127);
+    assert!(says(&hands, Wheel::Pitch, 127));
+
+    // A profile with another volume.
+    let mut other = hub.settings();
+    other.mixer.volumes[usize::from(Channel::Headphones.index())] = Some(40);
+    hub.load(other).unwrap();
+    settled(&mut hub, &clock);
+    assert_eq!(headphones(&hands), 40);
+    assert!(says(&hands, Wheel::Pitch, 40));
+}
+
+#[test]
+fn a_dial_on_the_track_under_a_fader_follows_the_fader() {
+    let (mut hub, hands, clock) = timed_hub();
+    hub.apply(Intent::SetWheel {
+        wheel: Wheel::Echo,
+        action: Some(WheelAction::Volume {
+            target: AudioTarget::FaderTrack { fader: Fader::C },
+            step: 4,
+        }),
+    })
+    .unwrap();
     ready(&mut hub, &clock);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
-    assert_eq!(hands.state().encoders[0], 0, "the middle of -24..24");
+    let music = volume_of(&hands, Channel::Music);
+    assert!(says(&hands, Wheel::Echo, music));
 
+    hands.move_fader(Fader::C, 200);
+    settled(&mut hub, &clock);
+    assert_eq!(volume_of(&hands, Channel::Music), 200);
+    assert!(says(&hands, Wheel::Echo, 200));
+
+    // The dial moves the fader, and does not fight it.
+    let (_, (low, high)) = dial_at(&hands, Wheel::Echo);
+    hands.turn(Wheel::Echo, -4);
+    after(&mut hub, &clock, 50);
+    let now = volume_of(&hands, Channel::Music);
+    assert_eq!(now, volume_at(low, high, dial_at(&hands, Wheel::Echo).0));
+    assert!(now < 200);
+    settled(&mut hub, &clock);
+    assert_eq!(volume_of(&hands, Channel::Music), now);
+}
+
+#[test]
+fn dials_on_the_same_track_follow_each_other() {
+    let (mut hub, hands, clock) = timed_hub();
+    set_headphones(&mut hub, 100);
+    for wheel in Wheel::ALL {
+        hub.apply(wheel_of(wheel, Channel::Headphones, 4)).unwrap();
+        ready(&mut hub, &clock);
+    }
+    for wheel in Wheel::ALL {
+        assert!(says(&hands, wheel, 100), "{wheel:?}");
+    }
+
+    for turned in Wheel::ALL {
+        hands.turn(turned, 5);
+        after(&mut hub, &clock, 50);
+        let volume = volume_of(&hands, Channel::Headphones);
+        after(&mut hub, &clock, 50);
+        after(&mut hub, &clock, 50);
+        assert_eq!(volume_of(&hands, Channel::Headphones), volume, "{turned:?}");
+        for wheel in Wheel::ALL {
+            assert!(says(&hands, wheel, volume), "{wheel:?} after {turned:?}");
+        }
+    }
+}
+
+#[test]
+fn a_hand_that_moves_a_dial_as_the_volume_changes_does_not_make_it_jump() {
+    let (mut hub, hands, clock) = with_a_dial(4);
+    let before = volume_of(&hands, Channel::Headphones);
+    // The volume goes down by the screen and, in the same reading, a hand
+    // nudges the dial where it still says the old volume.
+    set_headphones(&mut hub, 10);
     hands.turn(Wheel::Pitch, 1);
     after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 110);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 10, "was {before}");
+    settled(&mut hub, &clock);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 10);
+    assert!(says(&hands, Wheel::Pitch, 10));
+}
+
+#[test]
+fn no_volume_jumps_when_the_dial_is_met_again_or_a_profile_is_loaded() {
+    // The dial moved while the device was out of sight.
+    let (mut hub, hands, clock) = with_a_dial(4);
+    hub.forget_presses();
+    hands.turn(Wheel::Pitch, -7);
+    ready(&mut hub, &clock);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
+    assert!(says(&hands, Wheel::Pitch, 100));
+
+    // Another job for the same dial, or for another: nothing is set.
+    hub.apply(wheel_to(Channel::Music, 4)).unwrap();
+    ready(&mut hub, &clock);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
+    let music = volume_of(&hands, Channel::Music);
+    assert!(says(&hands, Wheel::Pitch, music));
+    assert_eq!(volume_of(&hands, Channel::Music), music);
+
+    // A profile loaded with other jobs for the dials.
+    let mut other = hub.settings();
+    other.controls.set_wheel(
+        Wheel::Pitch,
+        Some(WheelAction::Volume {
+            target: AudioTarget::Channel {
+                channel: Channel::Headphones,
+            },
+            step: 2,
+        }),
+    );
+    hub.load(other).unwrap();
+    assert!(!hub.dials_are_ready());
+    ready(&mut hub, &clock);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
+    assert!(says(&hands, Wheel::Pitch, 100));
 }
 
 #[test]
@@ -633,93 +822,52 @@ fn a_dial_that_has_no_job_is_left_alone_by_the_app() {
 }
 
 #[test]
-fn a_dial_never_runs_out_of_travel_whatever_its_travel_is() {
-    // Pitch, gender, reverb and echo do not have the same travel, nor the same
-    // middle.
-    for wheel in Wheel::ALL {
-        let (mut hub, hands, clock) = timed_hub();
-        hub.apply(Intent::SetVolume {
-            channel: Channel::Headphones,
-            volume: 0,
-        })
-        .unwrap();
-        hub.apply(wheel_of(wheel, Channel::Headphones, 1)).unwrap();
-        ready(&mut hub, &clock);
-
-        // Up for a long way, in the strides of a hand, without looking at the
-        // volume: it goes up as far as the finger does.
-        let mut expected = 0i32;
-        for _ in 0..20 {
-            hands.turn(wheel, 10);
-            after(&mut hub, &clock, 50);
-            // A volume moves by a whole number of units for ten notches of 1%.
-            expected = (expected + 26).min(255);
-            assert_eq!(
-                i32::from(volume_of(&hands, Channel::Headphones)),
-                expected,
-                "{wheel:?} going up"
-            );
-        }
-        assert_eq!(expected, 255);
-        // And down again, all the way, with no notch lost on the way.
-        for _ in 0..20 {
-            hands.turn(wheel, -10);
-            after(&mut hub, &clock, 50);
-            expected = (expected - 26).max(0);
-            assert_eq!(
-                i32::from(volume_of(&hands, Channel::Headphones)),
-                expected,
-                "{wheel:?} going down"
-            );
-        }
-        assert_eq!(expected, 0);
+fn a_volume_the_app_does_not_know_leaves_the_dial_alone_until_it_is_set() {
+    let (mut hub, hands, clock) = unknown_hub();
+    hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
+    let before = hands.state().encoders;
+    for _ in 0..100 {
+        after(&mut hub, &clock, 50);
     }
-}
-
-#[test]
-fn a_dial_still_goes_up_after_buttons_lowered_the_volume() {
-    let (mut hub, hands, clock) = with_a_dial(2);
-    give(
-        &mut hub,
-        PAD,
-        Gesture::Short,
-        volume(Channel::Headphones, VolumeMode::Down, 5),
+    // Not measured, not put anywhere.
+    assert_eq!(hands.state().encoders, before);
+    assert_eq!(
+        hub.poll().unwrap().dials[0].state,
+        "unknownVolume",
+        "the screen says it"
     );
-    // Down a long way with the dial first, then the button twice, then up.
-    for _ in 0..6 {
-        hands.turn(Wheel::Pitch, -10);
-        after(&mut hub, &clock, 50);
-    }
-    assert_eq!(volume_of(&hands, Channel::Headphones), 0);
-    set_headphones(&mut hub, 100);
-    tap(&mut hub, &hands, &clock, PAD);
-    tap(&mut hub, &hands, &clock, PAD);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 74);
+    hands.turn(Wheel::Pitch, 4);
+    hands.turn(Wheel::Pitch, 20);
+    after(&mut hub, &clock, 50);
+    assert_eq!(
+        hub.mixer().volumes[usize::from(Channel::Headphones.index())],
+        None
+    );
+    assert_eq!(dial_at(&hands, Wheel::Pitch).0, 24);
 
-    let mut last = 74;
-    for _ in 0..12 {
-        hands.turn(Wheel::Pitch, 10);
-        after(&mut hub, &clock, 50);
-        let now = volume_of(&hands, Channel::Headphones);
-        assert!(now > last || now == 255, "{now} after {last}");
-        last = now;
-    }
-    assert_eq!(last, 255, "all the way to the top");
+    // Set once, the dial is measured and put there, and the volume stays.
+    set_headphones(&mut hub, 100);
+    ready(&mut hub, &clock);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
+    assert!(says(&hands, Wheel::Pitch, 100));
 }
 
 #[test]
-fn a_dial_at_the_end_of_its_travel_that_cannot_be_put_back_is_only_followed() {
+fn a_dial_that_the_device_does_not_put_is_only_followed_and_says_so() {
     // A device that does not hear the command that puts a dial somewhere.
     let (mut hub, hands, clock) = timed_hub();
     hands.ignore_encoder_writes(true);
     set_headphones(&mut hub, 100);
     hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
     ready(&mut hub, &clock);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 100, "no jump");
+    assert_eq!(hub.poll().unwrap().dials[0].state, "followOnly");
 
+    // The volume is followed by how far the dial turns, a few percent a notch.
     hands.turn(Wheel::Pitch, 3);
     after(&mut hub, &clock, 50);
     assert_eq!(volume_of(&hands, Channel::Headphones), 131);
-    // Nothing is made up: it stops where the device stops it.
+    // And it stops where the device stops it, nothing is made up.
     hands.turn(Wheel::Pitch, 100);
     after(&mut hub, &clock, 50);
     let stuck = volume_of(&hands, Channel::Headphones);
@@ -729,26 +877,25 @@ fn a_dial_at_the_end_of_its_travel_that_cannot_be_put_back_is_only_followed() {
 }
 
 #[test]
-fn a_wild_reading_is_not_followed() {
+fn a_reading_too_far_to_be_a_hand_does_not_set_the_volume() {
     let (mut hub, hands, clock) = timed_hub();
     // A wide travel, wider than a hand can turn in a reading.
     hands.limit(Wheel::Pitch, -100, 100);
     set_headphones(&mut hub, 100);
     hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
     ready(&mut hub, &clock);
-    assert_eq!(hands.state().encoders[0], 0);
+    assert!(says(&hands, Wheel::Pitch, 100));
 
-    hands.turn(Wheel::Pitch, 30);
+    hands.turn(Wheel::Pitch, 40);
     after(&mut hub, &clock, 50);
     assert_eq!(volume_of(&hands, Channel::Headphones), 100);
-    // From there on, notches count again.
-    hands.turn(Wheel::Pitch, 1);
-    after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 110);
+    settled(&mut hub, &clock);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
+    assert!(says(&hands, Wheel::Pitch, 100));
 }
 
 #[test]
-fn a_device_that_refuses_to_put_a_dial_back_does_not_fail_the_reading() {
+fn a_device_that_refuses_to_put_a_dial_does_not_fail_the_reading() {
     let (inner, hands) = VirtualGoXlr::new();
     let deaf = Arc::new(AtomicBool::new(false));
     let link = Deaf {
@@ -772,23 +919,7 @@ fn a_device_that_refuses_to_put_a_dial_back_does_not_fail_the_reading() {
         assert!(hub.poll().is_ok(), "a dial that stays put is no failure");
     }
     assert!(hub.dials_are_ready(), "it is followed as it stands");
-}
-
-#[test]
-fn a_volume_turned_by_a_dial_stays_in_its_range() {
-    let (mut hub, hands, clock) = timed_hub();
-    set_headphones(&mut hub, 250);
-    hub.apply(wheel_to(Channel::Headphones, WHEEL_STEP_PERCENT.2))
-        .unwrap();
-    ready(&mut hub, &clock);
-    hands.turn(Wheel::Pitch, 10);
-    after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 255);
-    hands.turn(Wheel::Pitch, -20);
-    after(&mut hub, &clock, 50);
-    hands.turn(Wheel::Pitch, -20);
-    after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 0);
+    assert_eq!(hub.poll().unwrap().dials[0].state, "followOnly");
 }
 
 #[test]
@@ -811,9 +942,10 @@ fn each_dial_has_its_own_job_and_a_dial_with_none_does_nothing() {
     hands.turn(Wheel::Echo, 5);
     after(&mut hub, &clock, 50);
     assert_eq!(volume_of(&hands, Channel::Headphones), 100);
-    assert_eq!(volume_of(&hands, Channel::Music), music + 26);
-    // The fader under the track travels there.
-    assert_eq!(hub.poll().unwrap().faders[2].volume, music + 26);
+    let (_, (low, high)) = dial_at(&hands, Wheel::Echo);
+    let now = volume_of(&hands, Channel::Music);
+    assert!(now > music);
+    assert_eq!(now, volume_at(low, high, dial_at(&hands, Wheel::Echo).0));
 
     // Taking the job away.
     hub.apply(Intent::SetWheel {
@@ -829,68 +961,7 @@ fn each_dial_has_its_own_job_and_a_dial_with_none_does_nothing() {
     hub.apply(Intent::ResetControls { button: None }).unwrap();
     hands.turn(Wheel::Echo, 5);
     after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Music), music + 26);
-}
-
-#[test]
-fn turns_made_while_the_device_was_out_of_sight_are_not_counted() {
-    let (mut hub, hands, clock) = with_a_dial(4);
-
-    hub.forget_presses();
-    hands.turn(Wheel::Pitch, 10);
-    ready(&mut hub, &clock);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
-    hands.turn(Wheel::Pitch, 1);
-    after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 110);
-}
-
-#[test]
-fn a_dial_given_another_job_is_felt_for_again() {
-    let (mut hub, hands, clock) = with_a_dial(4);
-    hub.apply(wheel_to(Channel::Music, 4)).unwrap();
-    assert!(!hub.dials_are_ready());
-    hands.turn(Wheel::Pitch, 3);
-    ready(&mut hub, &clock);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
-
-    // A profile loaded with other jobs does the same.
-    let mut other = hub.settings();
-    other.controls.set_wheel(
-        Wheel::Pitch,
-        Some(WheelAction::Volume {
-            target: AudioTarget::Channel {
-                channel: Channel::Headphones,
-            },
-            step: 2,
-        }),
-    );
-    hub.load(other).unwrap();
-    assert!(!hub.dials_are_ready());
-    ready(&mut hub, &clock);
-}
-
-#[test]
-fn a_dial_leaves_a_volume_the_app_does_not_know_alone_until_it_is_set() {
-    let (mut hub, hands, clock) = unknown_hub();
-    hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
-    ready(&mut hub, &clock);
-    let before = volume_of(&hands, Channel::Headphones);
-    // A turn that is fast, and a turn that is slow: the same nothing.
-    hands.turn(Wheel::Pitch, 2);
-    after(&mut hub, &clock, 50);
-    hands.turn(Wheel::Pitch, 20);
-    after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), before);
-    assert_eq!(
-        hub.mixer().volumes[usize::from(Channel::Headphones.index())],
-        None
-    );
-
-    set_headphones(&mut hub, 100);
-    hands.turn(Wheel::Pitch, -2);
-    after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 80);
+    assert_eq!(volume_of(&hands, Channel::Music), now);
 }
 
 #[test]
@@ -1082,11 +1153,7 @@ fn four_dials_one_after_the_other(past: PastTheEnd, travels: [(i8, i8); 4]) {
     for (wheel, (low, high)) in Wheel::ALL.into_iter().zip(travels) {
         hands.limit(wheel, low, high);
     }
-    hub.apply(Intent::SetVolume {
-        channel: Channel::Headphones,
-        volume: 77,
-    })
-    .unwrap();
+    set_headphones(&mut hub, 77);
     for wheel in Wheel::ALL {
         hub.apply(wheel_of(wheel, Channel::Headphones, 2)).unwrap();
         ready(&mut hub, &clock);
@@ -1094,42 +1161,46 @@ fn four_dials_one_after_the_other(past: PastTheEnd, travels: [(i8, i8); 4]) {
         for _ in 0..60 {
             after(&mut hub, &clock, 50);
         }
+        assert_eq!(volume_of(&hands, Channel::Headphones), 77);
     }
     for wheel in Wheel::ALL {
-        // The strides of a quick hand: four notches in a reading.
-        for _ in 0..25 {
-            hands.turn(wheel, 4);
-            let before = volume_of(&hands, Channel::Headphones);
+        assert!(says(&hands, wheel, 77), "{wheel:?}, {past:?}, {travels:?}");
+    }
+    for wheel in Wheel::ALL {
+        let (low, high) = hands.state().encoder_ranges[wheel.index()];
+        let travel = (i16::from(high) - i16::from(low)) as usize;
+        for _ in 0..travel + 4 {
+            hands.turn(wheel, 1);
             after(&mut hub, &clock, 50);
-            let now = volume_of(&hands, Channel::Headphones);
-            assert!(
-                now > before || now == 255,
-                "{wheel:?} up, {past:?}, {travels:?}: {before} then {now}"
-            );
         }
-        for _ in 0..80 {
-            hands.turn(wheel, -4);
-            let before = volume_of(&hands, Channel::Headphones);
+        assert_eq!(
+            volume_of(&hands, Channel::Headphones),
+            255,
+            "{wheel:?} up, {past:?}, {travels:?}"
+        );
+        for _ in 0..travel + 4 {
+            hands.turn(wheel, -1);
             after(&mut hub, &clock, 50);
-            let now = volume_of(&hands, Channel::Headphones);
-            assert!(
-                now < before || now == 0,
-                "{wheel:?} down, {past:?}, {travels:?}: {before} then {now}"
-            );
         }
-        assert_eq!(volume_of(&hands, Channel::Headphones), 0, "{wheel:?}");
-        hub.apply(Intent::SetVolume {
-            channel: Channel::Headphones,
-            volume: 77,
-        })
-        .unwrap();
+        assert_eq!(
+            volume_of(&hands, Channel::Headphones),
+            0,
+            "{wheel:?} down, {past:?}, {travels:?}"
+        );
+        set_headphones(&mut hub, 77);
+        settled(&mut hub, &clock);
+        for other in Wheel::ALL {
+            assert!(says(&hands, other, 77), "{other:?} after {wheel:?}");
+        }
     }
 }
 
 #[test]
-fn four_dials_given_the_same_track_one_after_the_other_all_turn_it() {
+fn four_dials_given_the_same_track_one_after_the_other_all_set_it() {
     for past in [PastTheEnd::Stops, PastTheEnd::Refused, PastTheEnd::Resets] {
         for travels in [
+            // What the real ones were found to be.
+            [(-24, 24), (-24, 24), (0, 24), (0, 24)],
             [(-24, 24), (-12, 12), (0, 36), (0, 36)],
             [(-12, 12), (-12, 12), (0, 100), (0, 100)],
             [(-24, 24), (-24, 24), (0, 127), (-128, 127)],
@@ -1141,7 +1212,7 @@ fn four_dials_given_the_same_track_one_after_the_other_all_turn_it() {
 }
 
 #[test]
-fn the_snapshot_says_what_each_dial_is_doing_and_what_the_device_reports() {
+fn the_snapshot_says_what_each_dial_is_doing_and_what_it_sets() {
     let (mut hub, hands, clock) = timed_hub();
     set_headphones(&mut hub, 100);
     hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
@@ -1160,9 +1231,24 @@ fn the_snapshot_says_what_each_dial_is_doing_and_what_the_device_reports() {
     assert_eq!(
         serde_json::to_value(snapshot.dials[0]).unwrap(),
         json!({
-            "wheel": "pitch", "reading": 0, "state": "ready",
-            "low": -24, "high": 24, "asked": null, "refused": false
+            "wheel": "pitch", "reading": -5, "state": "ready",
+            "low": -24, "high": 24, "percent": 39, "notch": 19, "notches": 48,
+            "asked": null, "refused": false
         })
+    );
+
+    // A volume that changes by other means: the dial says "syncing" until it
+    // is where the volume is.
+    set_headphones(&mut hub, 255);
+    let snapshot = after(&mut hub, &clock, 50);
+    assert_eq!(snapshot.dials[0].state, "syncing");
+    assert_eq!(snapshot.dials[0].percent, Some(100));
+    settled(&mut hub, &clock);
+    let snapshot = hub.poll().unwrap();
+    assert_eq!(snapshot.dials[0].state, "ready");
+    assert_eq!(
+        (snapshot.dials[0].notch, snapshot.dials[0].notches),
+        (Some(48), Some(48))
     );
 
     // A dial the device does not obey is followed only, and says so.
@@ -1176,4 +1262,5 @@ fn the_snapshot_says_what_each_dial_is_doing_and_what_the_device_reports() {
         (snapshot.dials[0].low, snapshot.dials[0].high),
         (None, None)
     );
+    assert_eq!(snapshot.dials[0].notch, None);
 }

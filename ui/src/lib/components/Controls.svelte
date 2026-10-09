@@ -11,6 +11,7 @@
     type ButtonId,
     type ButtonView,
     type ChannelId,
+    type DialView,
     type Snapshot,
     type WheelId,
     type WheelView,
@@ -79,6 +80,10 @@
 
   function wheelOf(wheel: WheelId): WheelView {
     return controls?.wheels?.find((view) => view.wheel === wheel) ?? { wheel, action: null };
+  }
+
+  function dialOf(wheel: WheelId): DialView | null {
+    return device?.dials?.find((seen) => seen.wheel === wheel) ?? null;
   }
 
   function lit(button: ButtonId): boolean {
@@ -153,7 +158,8 @@
               {/if}
               <ul>
                 {#each WHEELS as wheel (wheel)}
-                  {@const what = wheelText(wheelOf(wheel), t, names)}
+                  {@const seen = dialOf(wheel)}
+                  {@const what = wheelText(wheelOf(wheel), t, names, seen)}
                   <li class="wheel">
                     <ControlCell
                       name={t.wheels[wheel]}
@@ -206,7 +212,7 @@
             wheel={selectedWheel}
             name={t.wheels[selectedWheel]}
             view={wheelOf(selectedWheel)}
-            dial={device.dials?.find((seen) => seen.wheel === selectedWheel) ?? null}
+            dial={dialOf(selectedWheel)}
           />
         {:else}
           <p class="hint choose">{t.choose}</p>

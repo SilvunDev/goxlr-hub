@@ -2,14 +2,12 @@
   import { sendIntent } from '../backend';
   import { startingWheel } from '../controls';
   import {
-    WHEEL_STEP,
     type AudioTarget,
     type DialView,
     type WheelId,
     type WheelView,
   } from '../device';
   import { i18n } from '../i18n/index.svelte';
-  import MicSlider from './MicSlider.svelte';
   import TargetSelect from './TargetSelect.svelte';
 
   let {
@@ -40,16 +38,18 @@
     if (action) give({ ...action, target });
   }
 
-  function pickStep(step: number) {
-    if (action) give({ ...action, step });
-  }
-
   function said(text: string, values: Record<string, string | number>): string {
     return Object.entries(values).reduce(
       (result, [key, value]) => result.replace(`{${key}}`, String(value)),
       text,
     );
   }
+
+  /** How far a notch moves the volume: the whole volume over the notches of the travel. */
+  const realStep = $derived.by(() => {
+    if (!dial?.notches) return null;
+    return Math.round((1000 / dial.notches)) / 10;
+  });
 
   /** What the app sees of the dial, in words. */
   const seen = $derived.by(() => {
@@ -59,7 +59,16 @@
     if (dial.state === 'measuring') {
       lines.push(said(d.measuring, { asked: dial.asked ?? '—' }));
     } else if (dial.state === 'ready') {
-      lines.push(said(d.ready, { low: dial.low ?? '—', high: dial.high ?? '—' }));
+      lines.push(
+        said(d.ready, {
+          low: dial.low ?? '—',
+          high: dial.high ?? '—',
+          notch: dial.notch ?? '—',
+          notches: dial.notches ?? '—',
+        }),
+      );
+    } else if (dial.state === 'followOnly') {
+      lines.push(said(d.followOnly, { step: action?.step ?? '—' }));
     } else {
       lines.push(d[dial.state]);
     }
@@ -85,16 +94,13 @@
 
   {#if action}
     <TargetSelect target={action.target} onchange={pickTarget} />
-    <div class="amount">
-      <MicSlider
-        name={t.wheel.step}
-        min={WHEEL_STEP.min}
-        max={WHEEL_STEP.max}
-        value={action.step}
-        text={(step) => t.volume.percent.replace('{percent}', String(step))}
-        onset={pickStep}
-      />
-    </div>
+    <p class="hint">
+      {realStep === null
+        ? t.wheel.stepUnknown
+        : said(t.wheel.step, {
+            step: realStep.toLocaleString(i18n.locale, { maximumFractionDigits: 1 }),
+          })}
+    </p>
     <p class="hint">{t.wheel.unknown}</p>
   {/if}
 
@@ -143,11 +149,6 @@
     gap: 4px;
     padding-top: 12px;
     border-top: 1px solid var(--unlit);
-  }
-
-  .amount :global(.row) {
-    grid-template-columns: 120px minmax(60px, 1fr) 48px;
-    gap: 10px;
   }
 
   select {

@@ -289,10 +289,22 @@ export interface DialView {
   wheel: WheelId;
   /** The position the device reported at the last reading. */
   reading: number;
-  state: 'idle' | 'waiting' | 'measuring' | 'ready' | 'followOnly';
-  /** The travel found, once `ready`. */
+  state:
+    | 'idle'
+    | 'unknownVolume'
+    | 'waiting'
+    | 'measuring'
+    | 'syncing'
+    | 'ready'
+    | 'followOnly';
+  /** The travel found, once measured. */
   low: number | null;
   high: number | null;
+  /** The volume the dial sets, in percent, when the app knows it. */
+  percent: number | null;
+  /** Where the dial is, in notches from the bottom, and how many it has. */
+  notch: number | null;
+  notches: number | null;
   /** What the dial was last asked while it was measured. */
   asked: number | null;
   /** The device did not hear the last command to put the dial somewhere. */

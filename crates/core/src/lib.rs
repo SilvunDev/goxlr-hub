@@ -303,11 +303,18 @@ pub struct DialView {
     pub wheel: Wheel,
     /// The position the device reported at the last reading.
     pub reading: i8,
-    /// `idle` (no job), `waiting`, `measuring`, `ready` or `followOnly`.
+    /// `idle` (no job), `unknownVolume`, `waiting`, `measuring`, `syncing`,
+    /// `ready` or `followOnly`.
     pub state: &'static str,
-    /// The travel found, once `ready`.
+    /// The travel found, once measured.
     pub low: Option<i8>,
     pub high: Option<i8>,
+    /// The volume the dial sets, in percent, when the app knows it.
+    pub percent: Option<u8>,
+    /// Where the dial is in its travel, in notches from the bottom, and how
+    /// many notches the travel has.
+    pub notch: Option<u8>,
+    pub notches: Option<u8>,
     /// What the dial was last asked while it was measured.
     pub asked: Option<i8>,
     /// What the dial was last told to go to, and the device refused to hear.
@@ -599,12 +606,19 @@ impl Hub {
         self.dials = [Dial::Fresh; Wheel::COUNT];
     }
 
-    /// Whether every dial that has a job is ready to be followed: its travel
-    /// is known, or it cannot be put back.
+    /// Whether every dial that has a job is ready: in step with the volume it
+    /// sets, or only followed. A dial whose volume is not known is left alone.
     #[cfg(test)]
     pub(crate) fn dials_are_ready(&self) -> bool {
         Wheel::ALL.into_iter().all(|wheel| {
-            self.controls.wheel(wheel).is_none() || self.dials[wheel.index()].is_ready()
+            let Some(WheelAction::Volume { target, .. }) = self.controls.wheel(wheel) else {
+                return true;
+            };
+            let dial = self.dials[wheel.index()];
+            match self.known_volume(self.volume_channel(target)) {
+                Some(_) => dial.is_ready(),
+                None => dial == Dial::Fresh,
+            }
         })
     }
 
@@ -1029,12 +1043,17 @@ impl Hub {
         Ok(())
     }
 
-    /// Does what the dials that were turned since the last reading are for.
-    /// Only the distance travelled counts, never where a dial is. A dial
-    /// that has a job is put back to the middle of its travel when it strays,
-    /// so that it does not stop at the end of it: the device keeps a dial
-    /// within its travel, and a dial at the end says the same whatever the
-    /// finger does.
+    /// The volume of a track, when the app knows it: not guessed, and not the
+    /// lively one the virtual device shows.
+    fn known_volume(&self, channel: Channel) -> Option<u8> {
+        let at = usize::from(channel.index());
+        self.mixer.volumes[at].filter(|_| !self.invented[at])
+    }
+
+    /// Does what the dials that have a job are for. The place of a dial in its
+    /// travel is the volume it sets: a hand that turns it sets the volume, and
+    /// a volume that changes by other means puts the dial where it says it.
+    /// A dial that cannot be put is only followed by how far it turns.
     fn follow_wheels(&mut self, encoders: [i8; Wheel::COUNT]) -> Result<(), DeviceError> {
         self.readings = encoders;
         for wheel in Wheel::ALL {
@@ -1042,13 +1061,17 @@ impl Hub {
             let Some(WheelAction::Volume { target, step }) = self.controls.wheel(wheel) else {
                 // No job, no business of the app: the dial is left alone.
                 self.dials[at] = Dial::Fresh;
+                self.refused[at] = false;
                 continue;
             };
-            let moved = self.dials[at].read(encoders[at]);
+            let channel = self.volume_channel(target);
+            let moved = self.dials[at].read(encoders[at], self.known_volume(channel));
             self.dials[at] = moved.dial;
             self.refused[at] = false;
+            if let Some(volume) = moved.volume {
+                self.set_volume(channel, volume)?;
+            }
             if moved.notches != 0 {
-                let channel = self.volume_channel(target);
                 let change = (f32::from(moved.notches) * f32::from(step) * f32::from(u8::MAX)
                     / 100.0)
                     .round();
@@ -1064,6 +1087,38 @@ impl Hub {
             }
         }
         Ok(())
+    }
+
+    fn dial_view(&self, wheel: Wheel) -> DialView {
+        let at = wheel.index();
+        let dial = self.dials[at];
+        let travel = dial.travel();
+        let volume = match self.controls.wheel(wheel) {
+            Some(WheelAction::Volume { target, .. }) => {
+                self.known_volume(self.volume_channel(target))
+            }
+            None => None,
+        };
+        let state = if self.controls.wheel(wheel).is_none() {
+            "idle"
+        } else if volume.is_none() && dial == Dial::Fresh {
+            "unknownVolume"
+        } else {
+            dial.state()
+        };
+        let notches = travel.map(|(low, high)| (i16::from(high) - i16::from(low)) as u8);
+        DialView {
+            wheel,
+            reading: self.readings[at],
+            state,
+            low: travel.map(|(low, _)| low),
+            high: travel.map(|(_, high)| high),
+            percent: volume.map(|volume| ((u16::from(volume) * 100 + 127) / 255) as u8),
+            notch: travel.map(|(low, high)| self.readings[at].clamp(low, high).abs_diff(low)),
+            notches,
+            asked: dial.asked(),
+            refused: self.refused[at],
+        }
     }
 
     /// Reads what changed on the device and returns the picture to draw.
@@ -1160,24 +1215,7 @@ impl Hub {
             bank: self.mixer.bank,
             dials: Wheel::ALL
                 .into_iter()
-                .map(|wheel| {
-                    let at = wheel.index();
-                    let dial = self.dials[at];
-                    let travel = dial.travel();
-                    DialView {
-                        wheel,
-                        reading: self.readings[at],
-                        state: if self.controls.wheel(wheel).is_none() {
-                            "idle"
-                        } else {
-                            dial.state()
-                        },
-                        low: travel.map(|(low, _)| low),
-                        high: travel.map(|(_, high)| high),
-                        asked: dial.asked(),
-                        refused: self.refused[at],
-                    }
-                })
+                .map(|wheel| self.dial_view(wheel))
                 .collect(),
         })
     }

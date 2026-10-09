@@ -8,6 +8,7 @@ import {
   type ButtonId,
   type ButtonView,
   type ChannelId,
+  type DialView,
   type FaderId,
   type RoutingInputId,
   type RoutingOutputId,
@@ -155,13 +156,29 @@ export function actionText(action: Action, t: Texts, names: Names, held = false)
   return held ? t.summary.held.replace('{action}', text) : text;
 }
 
-/** What a dial does, in a few words. */
-export function wheelText(view: WheelView | undefined, t: Texts, names: Names): string {
+/**
+ * What a dial does, in a few words: what it sets and, when the device tells,
+ * where the volume is and where the dial is in its travel.
+ */
+export function wheelText(
+  view: WheelView | undefined,
+  t: Texts,
+  names: Names,
+  dial?: DialView | null,
+): string {
   const action = view?.action;
   if (!action) return t.nothing;
-  return t.summary.wheel
-    .replace('{target}', targetText(action.target, t, names))
-    .replace('{step}', String(action.step));
+  const target = targetText(action.target, t, names);
+  if (!dial || dial.state === 'idle') return t.summary.wheel.replace('{target}', target);
+  if (dial.percent === null) return t.summary.wheelUnknown.replace('{target}', target);
+  const volume = t.summary.wheelLive
+    .replace('{target}', target)
+    .replace('{percent}', String(dial.percent));
+  if (dial.notch === null || dial.notches === null) return volume;
+  const notch = t.summary.wheelNotch
+    .replace('{notch}', String(dial.notch))
+    .replace('{notches}', String(dial.notches));
+  return `${volume} · ${notch}`;
 }
 
 /**
