@@ -1,7 +1,13 @@
 <script lang="ts">
   import { sendIntent } from '../backend';
   import { startingWheel } from '../controls';
-  import { WHEEL_STEP, type AudioTarget, type WheelId, type WheelView } from '../device';
+  import {
+    WHEEL_STEP,
+    type AudioTarget,
+    type DialView,
+    type WheelId,
+    type WheelView,
+  } from '../device';
   import { i18n } from '../i18n/index.svelte';
   import MicSlider from './MicSlider.svelte';
   import TargetSelect from './TargetSelect.svelte';
@@ -10,10 +16,13 @@
     wheel,
     name,
     view,
+    dial = null,
   }: {
     wheel: WheelId;
     name: string;
     view: WheelView;
+    /** What the app sees of the dial, when the device says. */
+    dial?: DialView | null;
   } = $props();
 
   const t = $derived(i18n.t.controls);
@@ -34,6 +43,29 @@
   function pickStep(step: number) {
     if (action) give({ ...action, step });
   }
+
+  function said(text: string, values: Record<string, string | number>): string {
+    return Object.entries(values).reduce(
+      (result, [key, value]) => result.replace(`{${key}}`, String(value)),
+      text,
+    );
+  }
+
+  /** What the app sees of the dial, in words. */
+  const seen = $derived.by(() => {
+    if (!dial) return [];
+    const d = t.wheel.diag;
+    const lines = [said(d.reading, { reading: dial.reading })];
+    if (dial.state === 'measuring') {
+      lines.push(said(d.measuring, { asked: dial.asked ?? '—' }));
+    } else if (dial.state === 'ready') {
+      lines.push(said(d.ready, { low: dial.low ?? '—', high: dial.high ?? '—' }));
+    } else {
+      lines.push(d[dial.state]);
+    }
+    if (dial.refused) lines.push(d.refused);
+    return lines;
+  });
 </script>
 
 <section class="panel" aria-label={name}>
@@ -65,6 +97,15 @@
     </div>
     <p class="hint">{t.wheel.unknown}</p>
   {/if}
+
+  {#if dial}
+    <div class="seen" role="group" aria-label={t.wheel.diag.title}>
+      <span class="label">{t.wheel.diag.title}</span>
+      {#each seen as line (line)}
+        <p class="hint">{line}</p>
+      {/each}
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -94,6 +135,14 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .seen {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-top: 12px;
+    border-top: 1px solid var(--unlit);
   }
 
   .amount :global(.row) {

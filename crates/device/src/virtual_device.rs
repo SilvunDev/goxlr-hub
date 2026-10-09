@@ -21,6 +21,20 @@ pub const ENCODER_RANGES: [(i8, i8); Wheel::COUNT] = [(-24, 24), (-12, 12), (0, 
 /// The microphone simulation is paced for this many level readings a second.
 const MIC_READS_PER_SECOND: f32 = 20.0;
 
+/// What the virtual device does with a dial it is told to put past the end of
+/// its travel. Nobody knows what the real one does: the app must cope with
+/// each.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PastTheEnd {
+    /// The dial stops at the end.
+    #[default]
+    Stops,
+    /// The command is not obeyed: the dial stays where it was.
+    Refused,
+    /// The dial goes back to its lowest position.
+    Resets,
+}
+
 /// Everything the virtual device remembers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VirtualState {
@@ -50,6 +64,7 @@ pub struct VirtualState {
     /// The device hears the command that puts a dial somewhere, and does
     /// nothing: the way a firmware that does not know it would.
     pub encoder_writes_ignored: bool,
+    pub past_the_end: PastTheEnd,
     mic_reads: u64,
 }
 
@@ -73,6 +88,7 @@ impl Default for VirtualState {
             encoders: [0; 4],
             encoder_ranges: ENCODER_RANGES,
             encoder_writes_ignored: false,
+            past_the_end: PastTheEnd::Stops,
             mic_reads: 0,
         }
     }
@@ -124,7 +140,13 @@ impl VirtualState {
             }
             Request::SetEncoderValue { wheel, value } => {
                 if !self.encoder_writes_ignored {
-                    self.encoders[wheel.index()] = self.clamp_encoder(wheel, value);
+                    let (low, high) = self.encoder_ranges[wheel.index()];
+                    let at = &mut self.encoders[wheel.index()];
+                    match (value.clamp(low, high) == value, self.past_the_end) {
+                        (true, _) | (false, PastTheEnd::Stops) => *at = value.clamp(low, high),
+                        (false, PastTheEnd::Refused) => {}
+                        (false, PastTheEnd::Resets) => *at = low,
+                    }
                 }
                 Vec::new()
             }
@@ -296,6 +318,11 @@ impl VirtualHandle {
         let mut state = lock(&self.state);
         state.encoder_ranges[wheel.index()] = (low, high);
         state.encoders[wheel.index()] = state.clamp_encoder(wheel, state.encoders[wheel.index()]);
+    }
+
+    /// Says what the device does with a dial put past the end of its travel.
+    pub fn past_the_end(&self, what: PastTheEnd) {
+        lock(&self.state).past_the_end = what;
     }
 
     /// Makes the device deaf to the command that puts a dial somewhere.

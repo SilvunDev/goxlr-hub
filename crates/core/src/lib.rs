@@ -291,6 +291,27 @@ pub struct Snapshot {
     pub last_press: Option<LastPress>,
     /// The bank the pads are on.
     pub bank: Bank,
+    /// What the app makes of each dial: for whoever looks into why one does
+    /// not answer.
+    pub dials: Vec<DialView>,
+}
+
+/// What the app knows of one dial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DialView {
+    pub wheel: Wheel,
+    /// The position the device reported at the last reading.
+    pub reading: i8,
+    /// `idle` (no job), `waiting`, `measuring`, `ready` or `followOnly`.
+    pub state: &'static str,
+    /// The travel found, once `ready`.
+    pub low: Option<i8>,
+    pub high: Option<i8>,
+    /// What the dial was last asked while it was measured.
+    pub asked: Option<i8>,
+    /// What the dial was last told to go to, and the device refused to hear.
+    pub refused: bool,
 }
 
 /// A button went down.
@@ -395,6 +416,10 @@ pub struct Hub {
     last_press: Option<LastPress>,
     /// How each dial is followed.
     dials: [Dial; Wheel::COUNT],
+    /// Where each dial was at the last reading.
+    readings: [i8; Wheel::COUNT],
+    /// The device did not hear the last command to put a dial somewhere.
+    refused: [bool; Wheel::COUNT],
     /// Profiles asked for by buttons and not loaded yet.
     loads: Vec<Load>,
     /// Tracks whose volume the app set since the last time it was asked.
@@ -450,6 +475,8 @@ impl Hub {
             last_down: [None; Button::ALL.len()],
             last_press: None,
             dials: [Dial::Fresh; Wheel::COUNT],
+            readings: [0; Wheel::COUNT],
+            refused: [false; Wheel::COUNT],
             loads: Vec::new(),
             volumes_set: Vec::new(),
             invented: [false; Channel::COUNT],
@@ -1009,6 +1036,7 @@ impl Hub {
     /// within its travel, and a dial at the end says the same whatever the
     /// finger does.
     fn follow_wheels(&mut self, encoders: [i8; Wheel::COUNT]) -> Result<(), DeviceError> {
+        self.readings = encoders;
         for wheel in Wheel::ALL {
             let at = wheel.index();
             let Some(WheelAction::Volume { target, step }) = self.controls.wheel(wheel) else {
@@ -1018,6 +1046,7 @@ impl Hub {
             };
             let moved = self.dials[at].read(encoders[at]);
             self.dials[at] = moved.dial;
+            self.refused[at] = false;
             if moved.notches != 0 {
                 let channel = self.volume_channel(target);
                 let change = (f32::from(moved.notches) * f32::from(step) * f32::from(u8::MAX)
@@ -1031,6 +1060,7 @@ impl Hub {
                 // Not heard, or not taken: the dial is only followed. A
                 // device that is really gone says so at the next reading.
                 self.dials[at] = Dial::cannot_be_put(encoders[at]);
+                self.refused[at] = true;
             }
         }
         Ok(())
@@ -1128,6 +1158,27 @@ impl Hub {
                 .collect(),
             last_press: self.last_press,
             bank: self.mixer.bank,
+            dials: Wheel::ALL
+                .into_iter()
+                .map(|wheel| {
+                    let at = wheel.index();
+                    let dial = self.dials[at];
+                    let travel = dial.travel();
+                    DialView {
+                        wheel,
+                        reading: self.readings[at],
+                        state: if self.controls.wheel(wheel).is_none() {
+                            "idle"
+                        } else {
+                            dial.state()
+                        },
+                        low: travel.map(|(low, _)| low),
+                        high: travel.map(|(_, high)| high),
+                        asked: dial.asked(),
+                        refused: self.refused[at],
+                    }
+                })
+                .collect(),
         })
     }
 }

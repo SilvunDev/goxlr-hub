@@ -238,6 +238,17 @@ export const en = {
       turnDown: 'Turn {wheel} down one notch',
       turnUp: 'Turn {wheel} up one notch',
       demo: 'Demo mode: the buttons next to a dial turn it on the virtual device.',
+      diag: {
+        title: 'What the app sees',
+        reading: 'The device reports {reading}.',
+        idle: 'No job: the app leaves this dial alone.',
+        waiting: 'Waiting for the next reading.',
+        measuring: 'Measuring its travel (last asked: {asked}). Do not touch it for a moment.',
+        ready: 'Ready: its travel goes from {low} to {high}.',
+        followOnly:
+          'Followed by how far it turns only: its travel could not be measured or the dial put back, so it may stop at the end.',
+        refused: 'The device did not hear the last command to put it somewhere.',
+      },
     },
     target: 'What to act on',
     targetMic: 'The microphone',

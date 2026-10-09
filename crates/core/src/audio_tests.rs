@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use goxlr_hub_device::{DeviceKind, Session, VirtualGoXlr, VirtualHandle, open_virtual};
+use goxlr_hub_device::{
+    DeviceKind, PastTheEnd, Session, VirtualGoXlr, VirtualHandle, open_virtual,
+};
 use goxlr_hub_protocol::{
     Button, ButtonLight, Channel, Fader, OutputSet, RoutingInput, RoutingOutput, Side, Wheel,
 };
@@ -1069,4 +1071,109 @@ fn the_snapshot_tells_what_each_dial_does() {
         })
     );
     assert!(value["wheels"][3]["action"].is_null());
+}
+
+/// Gives the four dials the same track, one after the other with seconds
+/// between, as a user does from the screen, then turns each far in both
+/// directions.
+fn four_dials_one_after_the_other(past: PastTheEnd, travels: [(i8, i8); 4]) {
+    let (mut hub, hands, clock) = timed_hub();
+    hands.past_the_end(past);
+    for (wheel, (low, high)) in Wheel::ALL.into_iter().zip(travels) {
+        hands.limit(wheel, low, high);
+    }
+    hub.apply(Intent::SetVolume {
+        channel: Channel::Headphones,
+        volume: 77,
+    })
+    .unwrap();
+    for wheel in Wheel::ALL {
+        hub.apply(wheel_of(wheel, Channel::Headphones, 2)).unwrap();
+        ready(&mut hub, &clock);
+        // Seconds pass, nobody touches the device.
+        for _ in 0..60 {
+            after(&mut hub, &clock, 50);
+        }
+    }
+    for wheel in Wheel::ALL {
+        // The strides of a quick hand: four notches in a reading.
+        for _ in 0..25 {
+            hands.turn(wheel, 4);
+            let before = volume_of(&hands, Channel::Headphones);
+            after(&mut hub, &clock, 50);
+            let now = volume_of(&hands, Channel::Headphones);
+            assert!(
+                now > before || now == 255,
+                "{wheel:?} up, {past:?}, {travels:?}: {before} then {now}"
+            );
+        }
+        for _ in 0..80 {
+            hands.turn(wheel, -4);
+            let before = volume_of(&hands, Channel::Headphones);
+            after(&mut hub, &clock, 50);
+            let now = volume_of(&hands, Channel::Headphones);
+            assert!(
+                now < before || now == 0,
+                "{wheel:?} down, {past:?}, {travels:?}: {before} then {now}"
+            );
+        }
+        assert_eq!(volume_of(&hands, Channel::Headphones), 0, "{wheel:?}");
+        hub.apply(Intent::SetVolume {
+            channel: Channel::Headphones,
+            volume: 77,
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn four_dials_given_the_same_track_one_after_the_other_all_turn_it() {
+    for past in [PastTheEnd::Stops, PastTheEnd::Refused, PastTheEnd::Resets] {
+        for travels in [
+            [(-24, 24), (-12, 12), (0, 36), (0, 36)],
+            [(-12, 12), (-12, 12), (0, 100), (0, 100)],
+            [(-24, 24), (-24, 24), (0, 127), (-128, 127)],
+            [(-20, 20), (-15, 15), (0, 20), (0, 15)],
+        ] {
+            four_dials_one_after_the_other(past, travels);
+        }
+    }
+}
+
+#[test]
+fn the_snapshot_says_what_each_dial_is_doing_and_what_the_device_reports() {
+    let (mut hub, hands, clock) = timed_hub();
+    set_headphones(&mut hub, 100);
+    hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
+    hands.turn(Wheel::Gender, 4);
+
+    let snapshot = after(&mut hub, &clock, 50);
+    assert_eq!(snapshot.dials.len(), 4);
+    assert_eq!(snapshot.dials[0].state, "measuring");
+    assert_eq!(snapshot.dials[0].asked, Some(8));
+    // A dial with no job is not touched, but its position is told.
+    assert_eq!(snapshot.dials[1].state, "idle");
+    assert_eq!(snapshot.dials[1].reading, 4);
+
+    ready(&mut hub, &clock);
+    let snapshot = hub.poll().unwrap();
+    assert_eq!(
+        serde_json::to_value(snapshot.dials[0]).unwrap(),
+        json!({
+            "wheel": "pitch", "reading": 0, "state": "ready",
+            "low": -24, "high": 24, "asked": null, "refused": false
+        })
+    );
+
+    // A dial the device does not obey is followed only, and says so.
+    let (mut hub, hands, clock) = timed_hub();
+    hands.ignore_encoder_writes(true);
+    hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
+    ready(&mut hub, &clock);
+    let snapshot = hub.poll().unwrap();
+    assert_eq!(snapshot.dials[0].state, "followOnly");
+    assert_eq!(
+        (snapshot.dials[0].low, snapshot.dials[0].high),
+        (None, None)
+    );
 }

@@ -284,6 +284,21 @@ export interface WheelView {
   action: WheelAction | null;
 }
 
+/** What the app knows of a dial, for whoever looks into why one does not answer. */
+export interface DialView {
+  wheel: WheelId;
+  /** The position the device reported at the last reading. */
+  reading: number;
+  state: 'idle' | 'waiting' | 'measuring' | 'ready' | 'followOnly';
+  /** The travel found, once `ready`. */
+  low: number | null;
+  high: number | null;
+  /** What the dial was last asked while it was measured. */
+  asked: number | null;
+  /** The device did not hear the last command to put the dial somewhere. */
+  refused: boolean;
+}
+
 /** How far a notch of a dial moves a volume, in percent. */
 export const WHEEL_STEP = { min: 1, max: 10, step: 1, start: 4 };
 
@@ -400,6 +415,8 @@ export interface Snapshot {
   lastPress?: { button: string; count: number } | null;
   /** The bank the pads are on. */
   bank?: BankId;
+  /** What the app makes of each dial. */
+  dials?: DialView[];
 }
 
 /** The profiles of a snapshot, or nothing when the Rust side did not tell them. */

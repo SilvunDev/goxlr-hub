@@ -11,8 +11,13 @@
 /// not: it is a reading to ignore.
 const MAX_JUMP: i16 = 24;
 
-/// How far a dial is asked to go at each reading while its travel is felt for.
+/// How far a dial is first asked to go at each reading while its travel is
+/// felt for.
 const FEEL_STEP: i8 = 8;
+
+/// Readings a dial is felt for at most: about four seconds. After that it is
+/// only followed, whatever it did meanwhile.
+const FEEL_READINGS: u8 = 80;
 
 /// A travel narrower than this is not one worth putting the dial back in.
 const LEAST_TRAVEL: i16 = 4;
@@ -34,6 +39,11 @@ pub enum Dial {
         high: i8,
         /// What it was asked, and is expected to report.
         asked: Option<i8>,
+        /// How far it is asked to go: less each time a command is refused,
+        /// to find the end of the travel to the notch.
+        step: i8,
+        /// Readings left before it is given up on.
+        left: u8,
     },
     /// Its travel is known: it is followed, and put back to the middle when
     /// it strays.
@@ -46,6 +56,8 @@ pub enum Dial {
         /// take it.
         expecting: bool,
         before: i8,
+        /// Readings in a row that looked like a dial that was not put.
+        doubts: u8,
     },
     /// It cannot be put back: it is followed by how far it turns, and stops
     /// where the device stops it.
@@ -88,29 +100,64 @@ impl Dial {
         matches!(self, Self::Centred { .. } | Self::Free { .. })
     }
 
+    /// What the dial is doing, for whoever looks: `waiting`, `measuring`,
+    /// `ready` or `followOnly`.
+    pub fn state(self) -> &'static str {
+        match self {
+            Self::Fresh => "waiting",
+            Self::Feeling { .. } => "measuring",
+            Self::Centred { .. } => "ready",
+            Self::Free { .. } => "followOnly",
+        }
+    }
+
+    /// The travel found, lowest and highest.
+    pub fn travel(self) -> Option<(i8, i8)> {
+        match self {
+            Self::Centred { low, high, .. } => Some((low, high)),
+            _ => None,
+        }
+    }
+
+    /// What it was last asked while it is felt for.
+    pub fn asked(self) -> Option<i8> {
+        match self {
+            Self::Feeling { asked, .. } => asked,
+            _ => None,
+        }
+    }
+
     /// Takes a reading of the dial.
     pub fn read(self, now: i8) -> Step {
         match self {
-            Self::Fresh => feel(true, now, None, now),
+            Self::Fresh => feel(true, now, now, None, FEEL_STEP, FEEL_READINGS, now),
             Self::Feeling {
-                up, high, asked, ..
-            } => feel(up, high, asked, now),
+                up,
+                at,
+                high,
+                asked,
+                step,
+                left,
+            } => feel(up, at, high, asked, step, left, now),
             Self::Centred {
                 low,
                 high,
                 last,
                 expecting,
                 before,
+                doubts,
             } => {
                 let centre = middle(low, high);
                 let quarter = ((i16::from(high) - i16::from(low)) / 4).max(1);
                 let off = (i16::from(now) - i16::from(centre)).abs();
-                if expecting && now == before && (now <= low || now >= high) {
-                    // It was put back from the end of its travel and did not
-                    // move: it cannot be put.
+                // Put back from the end of its travel and still there: the
+                // device did not take it, or a hand went straight back. Twice
+                // in a row, it is the device.
+                let suspect = expecting && now == before && (now <= low || now >= high);
+                if suspect && doubts >= 1 {
                     return Step::stay(Self::Free { last: now });
                 }
-                let notches = turned(last, now);
+                let notches = if suspect { 0 } else { turned(last, now) };
                 let strayed = off > quarter;
                 Step {
                     dial: Self::Centred {
@@ -119,6 +166,7 @@ impl Dial {
                         last: if strayed { centre } else { now },
                         expecting: strayed,
                         before: now,
+                        doubts: if suspect { doubts + 1 } else { 0 },
                     },
                     notches,
                     put: strayed.then_some(centre),
@@ -139,30 +187,42 @@ impl Dial {
 }
 
 /// The next ask of a dial that is being felt for, a step further.
-fn further(up: bool, from: i8) -> Option<i8> {
+fn further(up: bool, from: i8, step: i8) -> Option<i8> {
     let to = if up {
-        from.saturating_add(FEEL_STEP)
+        from.saturating_add(step)
     } else {
-        from.saturating_sub(FEEL_STEP)
+        from.saturating_sub(step)
     };
     (to != from).then_some(to)
 }
 
-fn feel(up: bool, high: i8, asked: Option<i8>, now: i8) -> Step {
-    // Where it went, when it was asked to go further. Short of it, that is
-    // the end of its travel.
-    let (at, end) = match asked {
-        Some(asked) if now == asked => (now, false),
-        Some(_) => (now, true),
-        None => (now, false),
+fn feel(up: bool, prev: i8, high: i8, asked: Option<i8>, step: i8, left: u8, now: i8) -> Step {
+    // A dial that does not answer as expected is not waited for for ever.
+    if left == 0 {
+        return Step::stay(Dial::Free { last: now });
+    }
+    let left = left - 1;
+    // What the dial did with what it was asked. It went where it was asked:
+    // on to the next step. It stopped short but went on: that is the end of
+    // its travel. It did not go on, or went back: the command was not obeyed,
+    // the step was too long, a shorter one is tried until it is one notch.
+    let moved_on = if up { now > prev } else { now < prev };
+    let (at, step, end) = match asked {
+        Some(asked) if now == asked => (now, step, false),
+        Some(_) if !moved_on && step > 1 => (prev, step / 2, false),
+        Some(_) if !moved_on => (prev, step, true),
+        Some(_) => (now, step, true),
+        None => (now, step, false),
     };
-    if !end && let Some(to) = further(up, at) {
+    if !end && let Some(to) = further(up, at, step) {
         return Step {
             dial: Dial::Feeling {
                 up,
                 at,
                 high,
                 asked: Some(to),
+                step,
+                left,
             },
             notches: 0,
             put: Some(to),
@@ -170,13 +230,15 @@ fn feel(up: bool, high: i8, asked: Option<i8>, now: i8) -> Step {
     }
     if up {
         // The top is found: the bottom is next, from here.
-        return match further(false, at) {
+        return match further(false, at, FEEL_STEP) {
             Some(to) => Step {
                 dial: Dial::Feeling {
                     up: false,
                     at,
                     high: at,
                     asked: Some(to),
+                    step: FEEL_STEP,
+                    left,
                 },
                 notches: 0,
                 put: Some(to),
@@ -197,6 +259,7 @@ fn feel(up: bool, high: i8, asked: Option<i8>, now: i8) -> Step {
             last: centre,
             expecting: true,
             before: at,
+            doubts: 0,
         },
         notches: 0,
         put: Some(centre),
@@ -329,8 +392,13 @@ mod tests {
             last: 0,
             expecting: true,
             before: 24,
+            doubts: 0,
         };
+        // Once, it may be a hand that went straight back: put again.
         let step = centred.read(24);
+        assert_eq!((step.notches, step.put), (0, Some(0)));
+        // Twice, it is the device.
+        let step = step.dial.read(24);
         assert!(matches!(step.dial, Dial::Free { last: 24 }));
         assert_eq!((step.notches, step.put), (0, None));
 
@@ -354,6 +422,63 @@ mod tests {
         assert_eq!(dial.read(30).notches, 0);
         assert_eq!(dial.read(24).notches, 24);
         assert_eq!(Dial::Free { last: 5 }.read(-3).notches, -8);
+    }
+
+    #[test]
+    fn a_dial_felt_for_too_long_is_given_up_on() {
+        let mut dial = Dial::Feeling {
+            up: true,
+            at: 0,
+            high: 0,
+            asked: Some(8),
+            step: 8,
+            left: 2,
+        };
+        // It does what it is asked each time, and the readings run out.
+        let mut reading = 8;
+        for _ in 0..2 {
+            let step = dial.read(reading);
+            assert_eq!(step.dial.state(), "measuring");
+            reading = step.put.unwrap();
+            dial = step.dial;
+        }
+        let step = dial.read(reading);
+        assert_eq!(step.dial.state(), "followOnly");
+        assert_eq!((step.notches, step.put), (0, None));
+
+        // A fresh dial is given the whole of the time.
+        let mut dial = Dial::Fresh;
+        let mut reading = 0i8;
+        for _ in 0..u32::from(FEEL_READINGS) {
+            let step = dial.read(reading);
+            dial = step.dial;
+            if let Some(put) = step.put {
+                reading = put;
+            }
+            if dial.is_ready() {
+                break;
+            }
+        }
+        assert!(dial.is_ready(), "{dial:?}");
+    }
+
+    #[test]
+    fn a_dial_tells_what_it_is_doing() {
+        assert_eq!(Dial::Fresh.state(), "waiting");
+        let step = Dial::Fresh.read(0);
+        assert_eq!(
+            (step.dial.state(), step.dial.asked()),
+            ("measuring", Some(8))
+        );
+        let ready = Dial::Centred {
+            low: 0,
+            high: 36,
+            last: 18,
+            expecting: false,
+            before: 18,
+            doubts: 0,
+        };
+        assert_eq!((ready.state(), ready.travel()), ("ready", Some((0, 36))));
     }
 
     #[test]

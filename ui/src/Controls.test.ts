@@ -1047,6 +1047,54 @@ describe('Controls', () => {
       expect(screen.queryByRole('button', { name: /Turn .* dial/ })).toBeNull();
     });
 
+    it('says what the app sees of a dial, so that a dial that does not answer can be understood', async () => {
+      type Seen = NonNullable<Snapshot['dials']>[number];
+      const seen = (
+        wheel: Seen['wheel'],
+        state: Seen['state'],
+        more: Partial<Seen> = {},
+      ): Seen => ({
+        wheel,
+        reading: 7,
+        state,
+        low: null,
+        high: null,
+        asked: null,
+        refused: false,
+        ...more,
+      });
+      const controls = withDials(dial('pitch'), dial('gender'));
+      await open(
+        snapshot({
+          controls,
+          dials: [
+            seen('pitch', 'ready', { low: -24, high: 24 }),
+            seen('gender', 'measuring', { asked: 16 }),
+          ],
+        }),
+      );
+      await fireEvent.click(dialCell('Pitch dial'));
+      const panel = within(screen.getByRole('region', { name: 'Pitch dial' }));
+      expect(panel.getByText('The device reports 7.')).toBeTruthy();
+      expect(panel.getByText('Ready: its travel goes from -24 to 24.')).toBeTruthy();
+
+      await fireEvent.click(dialCell('Gender dial'));
+      expect(screen.getByText(/Measuring its travel \(last asked: 16\)/)).toBeTruthy();
+
+      await report(
+        snapshot({
+          controls,
+          dials: [seen('pitch', 'ready'), seen('gender', 'followOnly', { refused: true })],
+        }),
+      );
+      expect(screen.getByText(/Followed by how far it turns only/)).toBeTruthy();
+      expect(screen.getByText(/did not hear the last command/)).toBeTruthy();
+
+      // A state that tells nothing of the dials shows nothing of them.
+      await report(snapshot({ controls }));
+      expect(screen.queryByText(/The device reports/)).toBeNull();
+    });
+
     it('speaks French', async () => {
       await open(snapshot({ controls: withDials(dial('gender', 3)) }));
       i18n.setLocale('fr');

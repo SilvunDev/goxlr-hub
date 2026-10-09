@@ -17,7 +17,7 @@ use thiserror::Error;
 
 pub use hardware::{HardwareLink, OpenError, open_hardware, rival};
 pub use session::{Link, Session};
-pub use virtual_device::{VirtualGoXlr, VirtualHandle, VirtualState, open_virtual};
+pub use virtual_device::{PastTheEnd, VirtualGoXlr, VirtualHandle, VirtualState, open_virtual};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {

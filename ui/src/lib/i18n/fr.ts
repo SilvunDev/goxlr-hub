@@ -238,6 +238,18 @@ export const fr: Messages = {
       turnDown: 'Tourner {wheel} d’un cran vers le bas',
       turnUp: 'Tourner {wheel} d’un cran vers le haut',
       demo: 'Mode découverte : les boutons à côté d’une molette la tournent sur l’appareil virtuel.',
+      diag: {
+        title: 'Ce que voit l’appli',
+        reading: 'L’appareil indique {reading}.',
+        idle: 'Pas de rôle : l’appli laisse cette molette tranquille.',
+        waiting: 'En attente de la prochaine lecture.',
+        measuring:
+          'Mesure de sa course (dernière demande : {asked}). Ne la touchez pas un instant.',
+        ready: 'Prête : sa course va de {low} à {high}.',
+        followOnly:
+          'Suivie seulement par la distance dont on la tourne : sa course n’a pas pu être mesurée ou la molette remise au milieu, elle peut donc buter en bout de course.',
+        refused: 'L’appareil n’a pas entendu la dernière commande qui la place quelque part.',
+      },
     },
     target: 'Sur quoi agir',
     targetMic: 'Le micro',

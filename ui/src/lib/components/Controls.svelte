@@ -206,6 +206,7 @@
             wheel={selectedWheel}
             name={t.wheels[selectedWheel]}
             view={wheelOf(selectedWheel)}
+            dial={device.dials?.find((seen) => seen.wheel === selectedWheel) ?? null}
           />
         {:else}
           <p class="hint choose">{t.choose}</p>
