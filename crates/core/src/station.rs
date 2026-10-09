@@ -1282,6 +1282,10 @@ mod tests {
                 }),
             })
             .unwrap();
+        // The dial is felt for before it is followed.
+        for _ in 0..60 {
+            virtual_station.poll().unwrap();
+        }
         let turn = |notches| Intent::TurnWheel {
             wheel: goxlr_hub_protocol::Wheel::Pitch,
             notches,

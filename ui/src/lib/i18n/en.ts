@@ -227,7 +227,7 @@ export const en = {
       none: 'Nothing saved yet',
     },
     wheel: {
-      hint: 'A dial can set the volume of a track. The app follows how far you turn it, never where it stands.',
+      hint: 'A dial can set the volume of a track. The app follows how far you turn it, and puts the dial back to the middle of its travel as you go, so that it never stops at the end. For about a second after you give a dial a job, it is being measured and does not answer yet.',
       action: 'What the dial does',
       none: 'Nothing',
       volume: 'Volume of a track',

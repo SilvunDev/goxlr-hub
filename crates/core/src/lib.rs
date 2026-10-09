@@ -4,6 +4,7 @@
 
 pub mod backup;
 mod controls;
+mod dials;
 mod gestures;
 mod library;
 mod mic;
@@ -24,6 +25,7 @@ pub use controls::{
     Action, AudioTarget, Bank, ButtonActions, ButtonView, Controls, ControlsView, DOUBLE_PRESS_MS,
     LONG_PRESS_MS, MuteMode, RouteMode, VolumeMode, WHEEL_STEP_PERCENT, WheelAction, WheelView,
 };
+use dials::Dial;
 pub use gestures::{Clock, Gesture, SystemClock};
 use gestures::{Event, Recognizer};
 pub use library::{Assembly, FORMAT, Kind, Library, MixPiece, ProfileError, valid_name};
@@ -40,10 +42,6 @@ const FADER_TOLERANCE: u8 = 5;
 /// Readings a travelling fader is given before it is believed again: about
 /// a second.
 const FADER_TRAVEL_READINGS: u8 = 20;
-
-/// A dial that seems to have moved further than this between two readings did
-/// not: it is a reading to ignore.
-const MAX_WHEEL_JUMP: i16 = 24;
 
 /// A button stays lit on screen this long after it was let go, so that a
 /// quick press can be seen.
@@ -395,8 +393,8 @@ pub struct Hub {
     /// When each button was last seen down.
     last_down: [Option<Duration>; Button::ALL.len()],
     last_press: Option<LastPress>,
-    /// Where the dials were at the last reading.
-    encoders: Option<[i8; Wheel::COUNT]>,
+    /// How each dial is followed.
+    dials: [Dial; Wheel::COUNT],
     /// Profiles asked for by buttons and not loaded yet.
     loads: Vec<Load>,
     /// Tracks whose volume the app set since the last time it was asked.
@@ -451,7 +449,7 @@ impl Hub {
             before_holds: Vec::new(),
             last_down: [None; Button::ALL.len()],
             last_press: None,
-            encoders: None,
+            dials: [Dial::Fresh; Wheel::COUNT],
             loads: Vec::new(),
             volumes_set: Vec::new(),
             invented: [false; Channel::COUNT],
@@ -470,6 +468,12 @@ impl Hub {
         // A tap begun under other buttons must not end under these.
         if settings.controls != self.controls {
             self.recognizer.buttons_changed();
+        }
+        // A dial given another job is felt for again.
+        for wheel in Wheel::ALL {
+            if settings.controls.wheel(wheel) != self.controls.wheel(wheel) {
+                self.dials[wheel.index()] = Dial::Fresh;
+            }
         }
         self.mixer = settings.mixer;
         self.mic = settings.mic;
@@ -565,7 +569,16 @@ impl Hub {
     pub fn forget_presses(&mut self) {
         self.recognizer = Recognizer::default();
         self.held = None;
-        self.encoders = None;
+        self.dials = [Dial::Fresh; Wheel::COUNT];
+    }
+
+    /// Whether every dial that has a job is ready to be followed: its travel
+    /// is known, or it cannot be put back.
+    #[cfg(test)]
+    pub(crate) fn dials_are_ready(&self) -> bool {
+        Wheel::ALL.into_iter().all(|wheel| {
+            self.controls.wheel(wheel).is_none() || self.dials[wheel.index()].is_ready()
+        })
     }
 
     /// The tracks whose volume the app set, from the screen, a button or a
@@ -615,6 +628,7 @@ impl Hub {
             }
             Intent::SetWheel { wheel, action } => {
                 self.controls.set_wheel(wheel, action);
+                self.dials[wheel.index()] = Dial::Fresh;
                 Ok(())
             }
             Intent::ResetControls { button } => {
@@ -989,24 +1003,35 @@ impl Hub {
     }
 
     /// Does what the dials that were turned since the last reading are for.
-    /// Only the distance travelled counts, never where a dial is: a dial at
-    /// the end of its travel simply stops.
+    /// Only the distance travelled counts, never where a dial is. A dial
+    /// that has a job is put back to the middle of its travel when it strays,
+    /// so that it does not stop at the end of it: the device keeps a dial
+    /// within its travel, and a dial at the end says the same whatever the
+    /// finger does.
     fn follow_wheels(&mut self, encoders: [i8; Wheel::COUNT]) -> Result<(), DeviceError> {
-        let Some(before) = self.encoders.replace(encoders) else {
-            return Ok(());
-        };
         for wheel in Wheel::ALL {
-            let notches = i16::from(encoders[wheel.index()]) - i16::from(before[wheel.index()]);
-            if notches == 0 || notches.abs() > MAX_WHEEL_JUMP {
-                continue;
-            }
+            let at = wheel.index();
             let Some(WheelAction::Volume { target, step }) = self.controls.wheel(wheel) else {
+                // No job, no business of the app: the dial is left alone.
+                self.dials[at] = Dial::Fresh;
                 continue;
             };
-            let channel = self.volume_channel(target);
-            let change =
-                (f32::from(notches) * f32::from(step) * f32::from(u8::MAX) / 100.0).round();
-            self.change_volume(channel, change as i32)?;
+            let moved = self.dials[at].read(encoders[at]);
+            self.dials[at] = moved.dial;
+            if moved.notches != 0 {
+                let channel = self.volume_channel(target);
+                let change = (f32::from(moved.notches) * f32::from(step) * f32::from(u8::MAX)
+                    / 100.0)
+                    .round();
+                self.change_volume(channel, change as i32)?;
+            }
+            if let Some(value) = moved.put
+                && self.device.set_encoder(wheel, value).is_err()
+            {
+                // Not heard, or not taken: the dial is only followed. A
+                // device that is really gone says so at the next reading.
+                self.dials[at] = Dial::cannot_be_put(encoders[at]);
+            }
         }
         Ok(())
     }
@@ -1492,6 +1517,9 @@ mod tests {
         }
         fn set_muted(&mut self, channel: Channel, muted: bool) -> Result<(), DeviceError> {
             self.device.set_muted(channel, muted)
+        }
+        fn set_encoder(&mut self, wheel: Wheel, value: i8) -> Result<(), DeviceError> {
+            self.device.set_encoder(wheel, value)
         }
         fn set_mic_input_muted(&mut self, muted: bool) -> Result<(), DeviceError> {
             self.device.set_mic_input_muted(muted)
@@ -1986,6 +2014,9 @@ mod tests {
                 Ok(())
             }
             fn set_muted(&mut self, _: Channel, _: bool) -> Result<(), DeviceError> {
+                Ok(())
+            }
+            fn set_encoder(&mut self, _: Wheel, _: i8) -> Result<(), DeviceError> {
                 Ok(())
             }
             fn set_mic_input_muted(&mut self, _: bool) -> Result<(), DeviceError> {

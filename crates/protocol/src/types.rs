@@ -64,6 +64,10 @@ impl Wheel {
     pub fn index(self) -> usize {
         self as usize
     }
+
+    pub fn from_index(index: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(index)).copied()
+    }
 }
 
 listed_enum! {

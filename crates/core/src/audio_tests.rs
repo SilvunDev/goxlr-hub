@@ -536,9 +536,9 @@ fn a_volume_the_app_does_not_know_is_left_alone_by_raising_and_lowering_it() {
     assert_eq!(volume_of(&hands, Channel::Headphones), 76);
 }
 
-fn wheel_to(channel: Channel, step: u8) -> Intent {
+fn wheel_of(wheel: Wheel, channel: Channel, step: u8) -> Intent {
     Intent::SetWheel {
-        wheel: Wheel::Pitch,
+        wheel,
         action: Some(WheelAction::Volume {
             target: AudioTarget::Channel { channel },
             step,
@@ -546,11 +546,38 @@ fn wheel_to(channel: Channel, step: u8) -> Intent {
     }
 }
 
-#[test]
-fn a_dial_turned_sets_the_volume_it_was_given_notch_by_notch() {
+fn wheel_to(channel: Channel, step: u8) -> Intent {
+    wheel_of(Wheel::Pitch, channel, step)
+}
+
+/// Lets the dials that have a job find their travel, as they do when they are
+/// given one.
+fn ready(hub: &mut Hub, clock: &ManualClock) {
+    for _ in 0..400 {
+        if hub.dials_are_ready() {
+            // The dial was just put in the middle: one more reading sees it
+            // there.
+            after(hub, clock, 50);
+            return;
+        }
+        after(hub, clock, 50);
+    }
+    panic!("the dials never got ready");
+}
+
+/// A hub, its device and its clock, with the pitch dial given the volume of
+/// the headphones, known and set to 100.
+fn with_a_dial(step: u8) -> (Hub, VirtualHandle, ManualClock) {
     let (mut hub, hands, clock) = timed_hub();
     set_headphones(&mut hub, 100);
-    hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
+    hub.apply(wheel_to(Channel::Headphones, step)).unwrap();
+    ready(&mut hub, &clock);
+    (hub, hands, clock)
+}
+
+#[test]
+fn a_dial_turned_sets_the_volume_it_was_given_notch_by_notch() {
+    let (mut hub, hands, clock) = with_a_dial(4);
 
     hands.turn(Wheel::Pitch, 3);
     after(&mut hub, &clock, 50);
@@ -568,41 +595,130 @@ fn a_dial_turned_sets_the_volume_it_was_given_notch_by_notch() {
 }
 
 #[test]
-fn a_dial_is_followed_from_where_it_was_first_seen_and_never_by_where_it_is() {
+fn a_dial_is_given_time_to_find_its_travel_and_is_put_in_the_middle_of_it() {
     let (device, hands) = open_virtual().unwrap();
-    // The dial is far from zero when the app meets it.
+    // The dial is far from the middle when the app meets it.
     hands.turn(Wheel::Pitch, 17);
     let clock = ManualClock::default();
     let mut hub = Hub::connect(Box::new(device)).unwrap();
     hub.clock = Box::new(clock.clone());
     set_headphones(&mut hub, 100);
     hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
-
     hub.poll().unwrap();
+    assert!(!hub.dials_are_ready());
+
+    // Where it stands is not followed, nor what it is asked to do meanwhile.
+    ready(&mut hub, &clock);
     assert_eq!(volume_of(&hands, Channel::Headphones), 100);
+    assert_eq!(hands.state().encoders[0], 0, "the middle of -24..24");
+
     hands.turn(Wheel::Pitch, 1);
     after(&mut hub, &clock, 50);
     assert_eq!(volume_of(&hands, Channel::Headphones), 110);
 }
 
 #[test]
-fn a_dial_at_the_end_of_its_travel_stops_and_a_wild_reading_is_ignored() {
+fn a_dial_that_has_no_job_is_left_alone_by_the_app() {
     let (mut hub, hands, clock) = timed_hub();
+    let before = hands.state().encoders;
+    hands.turn(Wheel::Gender, 5);
+    for _ in 0..40 {
+        after(&mut hub, &clock, 50);
+    }
+    // The finger moved it, the app did not.
+    assert_eq!(hands.state().encoders[Wheel::Gender.index()], before[1] + 5);
+    assert_eq!(hands.state().encoders[Wheel::Pitch.index()], before[0]);
+}
+
+#[test]
+fn a_dial_never_runs_out_of_travel_whatever_its_travel_is() {
+    // Pitch, gender, reverb and echo do not have the same travel, nor the same
+    // middle.
+    for wheel in Wheel::ALL {
+        let (mut hub, hands, clock) = timed_hub();
+        hub.apply(Intent::SetVolume {
+            channel: Channel::Headphones,
+            volume: 0,
+        })
+        .unwrap();
+        hub.apply(wheel_of(wheel, Channel::Headphones, 1)).unwrap();
+        ready(&mut hub, &clock);
+
+        // Up for a long way, in the strides of a hand, without looking at the
+        // volume: it goes up as far as the finger does.
+        let mut expected = 0i32;
+        for _ in 0..20 {
+            hands.turn(wheel, 10);
+            after(&mut hub, &clock, 50);
+            // A volume moves by a whole number of units for ten notches of 1%.
+            expected = (expected + 26).min(255);
+            assert_eq!(
+                i32::from(volume_of(&hands, Channel::Headphones)),
+                expected,
+                "{wheel:?} going up"
+            );
+        }
+        assert_eq!(expected, 255);
+        // And down again, all the way, with no notch lost on the way.
+        for _ in 0..20 {
+            hands.turn(wheel, -10);
+            after(&mut hub, &clock, 50);
+            expected = (expected - 26).max(0);
+            assert_eq!(
+                i32::from(volume_of(&hands, Channel::Headphones)),
+                expected,
+                "{wheel:?} going down"
+            );
+        }
+        assert_eq!(expected, 0);
+    }
+}
+
+#[test]
+fn a_dial_still_goes_up_after_buttons_lowered_the_volume() {
+    let (mut hub, hands, clock) = with_a_dial(2);
+    give(
+        &mut hub,
+        PAD,
+        Gesture::Short,
+        volume(Channel::Headphones, VolumeMode::Down, 5),
+    );
+    // Down a long way with the dial first, then the button twice, then up.
+    for _ in 0..6 {
+        hands.turn(Wheel::Pitch, -10);
+        after(&mut hub, &clock, 50);
+    }
+    assert_eq!(volume_of(&hands, Channel::Headphones), 0);
+    set_headphones(&mut hub, 100);
+    tap(&mut hub, &hands, &clock, PAD);
+    tap(&mut hub, &hands, &clock, PAD);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 74);
+
+    let mut last = 74;
+    for _ in 0..12 {
+        hands.turn(Wheel::Pitch, 10);
+        after(&mut hub, &clock, 50);
+        let now = volume_of(&hands, Channel::Headphones);
+        assert!(now > last || now == 255, "{now} after {last}");
+        last = now;
+    }
+    assert_eq!(last, 255, "all the way to the top");
+}
+
+#[test]
+fn a_dial_at_the_end_of_its_travel_that_cannot_be_put_back_is_only_followed() {
+    // A device that does not hear the command that puts a dial somewhere.
+    let (mut hub, hands, clock) = timed_hub();
+    hands.ignore_encoder_writes(true);
     set_headphones(&mut hub, 100);
     hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
+    ready(&mut hub, &clock);
 
-    // Further than a hand can turn in a reading.
-    hands.turn(Wheel::Pitch, 30);
+    hands.turn(Wheel::Pitch, 3);
     after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
-    // From there on, notches count again.
-    hands.turn(Wheel::Pitch, 1);
-    after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 110);
-
-    // A dial pushed against the end of what it can tell says nothing more.
-    hands.turn(Wheel::Pitch, i8::MAX);
-    hands.turn(Wheel::Pitch, i8::MAX);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 131);
+    // Nothing is made up: it stops where the device stops it.
+    hands.turn(Wheel::Pitch, 100);
     after(&mut hub, &clock, 50);
     let stuck = volume_of(&hands, Channel::Headphones);
     hands.turn(Wheel::Pitch, 5);
@@ -611,17 +727,64 @@ fn a_dial_at_the_end_of_its_travel_stops_and_a_wild_reading_is_ignored() {
 }
 
 #[test]
+fn a_wild_reading_is_not_followed() {
+    let (mut hub, hands, clock) = timed_hub();
+    // A wide travel, wider than a hand can turn in a reading.
+    hands.limit(Wheel::Pitch, -100, 100);
+    set_headphones(&mut hub, 100);
+    hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
+    ready(&mut hub, &clock);
+    assert_eq!(hands.state().encoders[0], 0);
+
+    hands.turn(Wheel::Pitch, 30);
+    after(&mut hub, &clock, 50);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
+    // From there on, notches count again.
+    hands.turn(Wheel::Pitch, 1);
+    after(&mut hub, &clock, 50);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 110);
+}
+
+#[test]
+fn a_device_that_refuses_to_put_a_dial_back_does_not_fail_the_reading() {
+    let (inner, hands) = VirtualGoXlr::new();
+    let deaf = Arc::new(AtomicBool::new(false));
+    let link = Deaf {
+        inner,
+        deaf: deaf.clone(),
+    };
+    let device = Session::open(link, DeviceKind::Hardware).unwrap();
+    let mut hub = Hub::connect(Box::new(device)).unwrap();
+    let clock = ManualClock::default();
+    hub.clock = Box::new(clock.clone());
+    hub.poll().unwrap();
+    hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
+    after(&mut hub, &clock, 50);
+    assert!(!hub.dials_are_ready());
+
+    // From here the device answers readings, and nothing else.
+    deaf.store(true, Ordering::Relaxed);
+    hands.turn(Wheel::Pitch, 2);
+    for _ in 0..3 {
+        clock.advance(Duration::from_millis(50));
+        assert!(hub.poll().is_ok(), "a dial that stays put is no failure");
+    }
+    assert!(hub.dials_are_ready(), "it is followed as it stands");
+}
+
+#[test]
 fn a_volume_turned_by_a_dial_stays_in_its_range() {
     let (mut hub, hands, clock) = timed_hub();
     set_headphones(&mut hub, 250);
     hub.apply(wheel_to(Channel::Headphones, WHEEL_STEP_PERCENT.2))
         .unwrap();
+    ready(&mut hub, &clock);
     hands.turn(Wheel::Pitch, 10);
     after(&mut hub, &clock, 50);
     assert_eq!(volume_of(&hands, Channel::Headphones), 255);
-    hands.turn(Wheel::Pitch, -24);
+    hands.turn(Wheel::Pitch, -20);
     after(&mut hub, &clock, 50);
-    hands.turn(Wheel::Pitch, -24);
+    hands.turn(Wheel::Pitch, -20);
     after(&mut hub, &clock, 50);
     assert_eq!(volume_of(&hands, Channel::Headphones), 0);
 }
@@ -639,6 +802,7 @@ fn each_dial_has_its_own_job_and_a_dial_with_none_does_nothing() {
         }),
     })
     .unwrap();
+    ready(&mut hub, &clock);
     let music = volume_of(&hands, Channel::Music);
 
     hands.turn(Wheel::Gender, 4);
@@ -668,13 +832,11 @@ fn each_dial_has_its_own_job_and_a_dial_with_none_does_nothing() {
 
 #[test]
 fn turns_made_while_the_device_was_out_of_sight_are_not_counted() {
-    let (mut hub, hands, clock) = timed_hub();
-    set_headphones(&mut hub, 100);
-    hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
+    let (mut hub, hands, clock) = with_a_dial(4);
 
     hub.forget_presses();
     hands.turn(Wheel::Pitch, 10);
-    after(&mut hub, &clock, 50);
+    ready(&mut hub, &clock);
     assert_eq!(volume_of(&hands, Channel::Headphones), 100);
     hands.turn(Wheel::Pitch, 1);
     after(&mut hub, &clock, 50);
@@ -682,9 +844,35 @@ fn turns_made_while_the_device_was_out_of_sight_are_not_counted() {
 }
 
 #[test]
+fn a_dial_given_another_job_is_felt_for_again() {
+    let (mut hub, hands, clock) = with_a_dial(4);
+    hub.apply(wheel_to(Channel::Music, 4)).unwrap();
+    assert!(!hub.dials_are_ready());
+    hands.turn(Wheel::Pitch, 3);
+    ready(&mut hub, &clock);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 100);
+
+    // A profile loaded with other jobs does the same.
+    let mut other = hub.settings();
+    other.controls.set_wheel(
+        Wheel::Pitch,
+        Some(WheelAction::Volume {
+            target: AudioTarget::Channel {
+                channel: Channel::Headphones,
+            },
+            step: 2,
+        }),
+    );
+    hub.load(other).unwrap();
+    assert!(!hub.dials_are_ready());
+    ready(&mut hub, &clock);
+}
+
+#[test]
 fn a_dial_leaves_a_volume_the_app_does_not_know_alone_until_it_is_set() {
     let (mut hub, hands, clock) = unknown_hub();
     hub.apply(wheel_to(Channel::Headphones, 4)).unwrap();
+    ready(&mut hub, &clock);
     let before = volume_of(&hands, Channel::Headphones);
     // A turn that is fast, and a turn that is slow: the same nothing.
     hands.turn(Wheel::Pitch, 2);
@@ -698,9 +886,9 @@ fn a_dial_leaves_a_volume_the_app_does_not_know_alone_until_it_is_set() {
     );
 
     set_headphones(&mut hub, 100);
-    hands.turn(Wheel::Pitch, 2);
+    hands.turn(Wheel::Pitch, -2);
     after(&mut hub, &clock, 50);
-    assert_eq!(volume_of(&hands, Channel::Headphones), 120);
+    assert_eq!(volume_of(&hands, Channel::Headphones), 80);
 }
 
 #[test]

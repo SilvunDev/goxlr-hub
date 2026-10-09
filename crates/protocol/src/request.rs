@@ -1,6 +1,6 @@
 use crate::{
     ButtonLights, Channel, EffectKey, Fader, MicParamKey, MicType, OutputSet, ProtocolError,
-    RoutingInput, RoutingOutput, Side,
+    RoutingInput, RoutingOutput, Side, Wheel,
 };
 
 /// Size of a routing body on a full-size GoXLR.
@@ -13,6 +13,7 @@ const FAMILY_EFFECTS: u32 = 0x801;
 const FAMILY_ROUTING: u32 = 0x804;
 const FAMILY_FADER: u32 = 0x805;
 const FAMILY_VOLUME: u32 = 0x806;
+const FAMILY_ENCODER_VALUE: u32 = 0x80a;
 const FAMILY_BUTTON_LIGHTS: u32 = 0x808;
 const FAMILY_MUTE: u32 = 0x809;
 const FAMILY_MIC_PARAMS: u32 = 0x80b;
@@ -46,6 +47,12 @@ pub enum Request {
     SetMuted {
         channel: Channel,
         muted: bool,
+    },
+    /// Puts a dial at a position. The device keeps the dial within the travel
+    /// it has in its current mode: the position it reports is what it kept.
+    SetEncoderValue {
+        wheel: Wheel,
+        value: i8,
     },
     /// Sends one side of an input to a set of outputs.
     SetRouting {
@@ -101,6 +108,7 @@ impl Request {
             Self::GetSerialInfo => id(FAMILY_HARDWARE_INFO, 1),
             Self::SetFader { fader, .. } => id(FAMILY_FADER, fader.index()),
             Self::SetVolume { channel, .. } => id(FAMILY_VOLUME, channel.index()),
+            Self::SetEncoderValue { wheel, .. } => id(FAMILY_ENCODER_VALUE, wheel.index() as u8),
             Self::SetMuted { channel, .. } => id(FAMILY_MUTE, channel.index()),
             Self::SetRouting { input, side, .. } => id(FAMILY_ROUTING, input.id(side)),
             Self::SetButtonLights { .. } => id(FAMILY_BUTTON_LIGHTS, 0),
@@ -118,6 +126,7 @@ impl Request {
             | Self::GetSerialInfo => Vec::new(),
             Self::SetFader { channel, .. } => vec![channel.index(), 0, 0, 0],
             Self::SetVolume { volume, .. } => vec![volume],
+            Self::SetEncoderValue { value, .. } => vec![value.cast_unsigned()],
             Self::SetMuted { muted, .. } => vec![u8::from(muted)],
             Self::SetRouting { side, outputs, .. } => {
                 let mut body = vec![0; ROUTING_LEN];
@@ -187,6 +196,14 @@ impl Request {
                 Ok(Self::SetVolume {
                     channel,
                     volume: body[0],
+                })
+            }
+            (FAMILY_ENCODER_VALUE, _) => {
+                let wheel = Wheel::from_index(parameter).ok_or(unknown)?;
+                expect_len(body, 1)?;
+                Ok(Self::SetEncoderValue {
+                    wheel,
+                    value: body[0].cast_signed(),
                 })
             }
             (FAMILY_MUTE, _) => {
@@ -321,6 +338,32 @@ mod tests {
             volume: 200,
         };
         assert_eq!(bytes(request), (0x0080_6005, vec![200]));
+    }
+
+    #[test]
+    fn set_encoder_value_names_the_dial_in_the_id_and_sends_one_signed_byte() {
+        let request = Request::SetEncoderValue {
+            wheel: Wheel::Gender,
+            value: -2,
+        };
+        assert_eq!(bytes(request), (0x0080_a001, vec![0xfe]));
+        let request = Request::SetEncoderValue {
+            wheel: Wheel::Echo,
+            value: 18,
+        };
+        assert_eq!(bytes(request), (0x0080_a003, vec![18]));
+        for value in [i8::MIN, -1, 0, 1, i8::MAX] {
+            let request = Request::SetEncoderValue {
+                wheel: Wheel::Pitch,
+                value,
+            };
+            assert_eq!(
+                Request::decode(request.command_id(), &request.body()),
+                Ok(request)
+            );
+        }
+        assert!(Request::decode(0x0080_a004, &[0]).is_err());
+        assert!(Request::decode(0x0080_a000, &[]).is_err());
     }
 
     #[test]

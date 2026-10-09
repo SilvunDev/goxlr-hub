@@ -227,7 +227,7 @@ export const fr: Messages = {
       none: 'Rien d’enregistré pour l’instant',
     },
     wheel: {
-      hint: 'Une molette peut régler le volume d’une piste. L’appli suit de combien vous la tournez, jamais où elle se trouve.',
+      hint: 'Une molette peut régler le volume d’une piste. L’appli suit de combien vous la tournez et remet la molette au milieu de sa course au fur et à mesure, pour qu’elle ne bute jamais en bout de course. Pendant environ une seconde après qu’on lui a donné un rôle, la molette est mesurée et ne répond pas encore.',
       action: 'Ce que fait la molette',
       none: 'Rien',
       volume: 'Volume d’une piste',

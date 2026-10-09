@@ -13,6 +13,11 @@ use goxlr_hub_protocol::{
 
 use crate::{DeviceError, DeviceKind, Link, Session};
 
+/// The travel of each dial on the virtual device: pitch, gender, reverb, echo.
+/// What the real ones have is learned by feeling for it; these are only
+/// different from each other, and not centred on zero, on purpose.
+pub const ENCODER_RANGES: [(i8, i8); Wheel::COUNT] = [(-24, 24), (-12, 12), (0, 36), (0, 36)];
+
 /// The microphone simulation is paced for this many level readings a second.
 const MIC_READS_PER_SECOND: f32 = 20.0;
 
@@ -40,6 +45,11 @@ pub struct VirtualState {
     /// held, once, even if they were released already.
     tapped: ButtonSet,
     pub encoders: [i8; 4],
+    /// How far each dial can go, lowest and highest.
+    pub encoder_ranges: [(i8, i8); Wheel::COUNT],
+    /// The device hears the command that puts a dial somewhere, and does
+    /// nothing: the way a firmware that does not know it would.
+    pub encoder_writes_ignored: bool,
     mic_reads: u64,
 }
 
@@ -61,6 +71,8 @@ impl Default for VirtualState {
             pressed: ButtonSet::default(),
             tapped: ButtonSet::default(),
             encoders: [0; 4],
+            encoder_ranges: ENCODER_RANGES,
+            encoder_writes_ignored: false,
             mic_reads: 0,
         }
     }
@@ -110,6 +122,12 @@ impl VirtualState {
                 self.volumes[usize::from(channel.index())] = volume;
                 Vec::new()
             }
+            Request::SetEncoderValue { wheel, value } => {
+                if !self.encoder_writes_ignored {
+                    self.encoders[wheel.index()] = self.clamp_encoder(wheel, value);
+                }
+                Vec::new()
+            }
             Request::SetMuted { channel, muted } => {
                 self.muted[usize::from(channel.index())] = muted;
                 Vec::new()
@@ -145,6 +163,11 @@ impl VirtualState {
                 Vec::new()
             }
         }
+    }
+
+    fn clamp_encoder(&self, wheel: Wheel, value: i8) -> i8 {
+        let (low, high) = self.encoder_ranges[wheel.index()];
+        value.clamp(low, high)
     }
 
     /// The buttons held, or tapped since the last reading.
@@ -261,11 +284,23 @@ impl VirtualHandle {
     }
 
     /// Turns a dial by some notches, positive or negative. A dial stops at
-    /// the ends of what it can report.
+    /// the ends of its travel, like the real ones do.
     pub fn turn(&self, wheel: Wheel, notches: i8) {
         let mut state = lock(&self.state);
-        let at = &mut state.encoders[wheel.index()];
-        *at = at.saturating_add(notches);
+        let moved = state.encoders[wheel.index()].saturating_add(notches);
+        state.encoders[wheel.index()] = state.clamp_encoder(wheel, moved);
+    }
+
+    /// Gives a dial another travel, as another mode of the device would.
+    pub fn limit(&self, wheel: Wheel, low: i8, high: i8) {
+        let mut state = lock(&self.state);
+        state.encoder_ranges[wheel.index()] = (low, high);
+        state.encoders[wheel.index()] = state.clamp_encoder(wheel, state.encoders[wheel.index()]);
+    }
+
+    /// Makes the device deaf to the command that puts a dial somewhere.
+    pub fn ignore_encoder_writes(&self, ignored: bool) {
+        lock(&self.state).encoder_writes_ignored = ignored;
     }
 }
 
@@ -394,13 +429,33 @@ mod tests {
         let (mut device, hands) = open_virtual().unwrap();
         assert_eq!(device.status().unwrap().encoders, [0; 4]);
         hands.turn(Wheel::Gender, 3);
-        hands.turn(Wheel::Echo, -2);
+        hands.turn(Wheel::Echo, 2);
         hands.turn(Wheel::Gender, 1);
-        assert_eq!(device.status().unwrap().encoders, [0, 4, 0, -2]);
+        assert_eq!(device.status().unwrap().encoders, [0, 4, 0, 2]);
         // It stops at the end of what can be told.
         hands.turn(Wheel::Pitch, 100);
         hands.turn(Wheel::Pitch, 100);
-        assert_eq!(device.status().unwrap().encoders[0], i8::MAX);
+        assert_eq!(device.status().unwrap().encoders[0], 24);
+        hands.turn(Wheel::Echo, -50);
+        assert_eq!(device.status().unwrap().encoders[3], 0);
+    }
+
+    #[test]
+    fn a_dial_is_put_where_it_is_told_within_its_travel() {
+        let (mut device, hands) = open_virtual().unwrap();
+        device.set_encoder(Wheel::Reverb, 20).unwrap();
+        device.set_encoder(Wheel::Gender, -100).unwrap();
+        device.set_encoder(Wheel::Pitch, 100).unwrap();
+        assert_eq!(device.status().unwrap().encoders, [24, -12, 20, 0]);
+
+        // Another mode, another travel.
+        hands.limit(Wheel::Pitch, -5, 5);
+        assert_eq!(device.status().unwrap().encoders[0], 5);
+
+        // A device that does not hear the command keeps the dial where it is.
+        hands.ignore_encoder_writes(true);
+        device.set_encoder(Wheel::Reverb, 3).unwrap();
+        assert_eq!(device.status().unwrap().encoders[2], 20);
     }
 
     #[test]
