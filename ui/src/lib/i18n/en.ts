@@ -95,6 +95,8 @@ export const en = {
     connecting: 'Connecting…',
     fader: 'Fader',
     source: 'Channel of fader {fader}',
+    openControls: 'Set the mute button of fader {fader} in Controls',
+    buttonSettings: 'Button settings',
     mute: 'Mute {channel}',
     mic: 'Microphone',
     micHint: 'Like the microphone button of the GoXLR: nobody hears you, whatever the mixer says.',
@@ -105,9 +107,10 @@ export const en = {
   },
   pads: {
     title: 'Sampler pads',
-    hint: 'They light up here when you press them on the GoXLR. Choose what they do in Controls.',
+    hint: 'They light up here when you press them on the GoXLR. Click one to choose what it does in Controls.',
     pressed: '{pad}, pressed',
     released: '{pad}, released',
+    open: 'Set {pad} in Controls',
     names: {
       samplerSelectA: 'Bank A',
       samplerSelectB: 'Bank B',
@@ -129,8 +132,16 @@ export const en = {
     blocks: {
       faders: 'Faders',
       mic: 'Microphone',
+      wheels: 'Dials',
       effects: 'Effects',
       sampler: 'Sampler',
+    },
+    faderHint: 'The track under each fader. Change it here or on the Mixer.',
+    wheels: {
+      pitch: 'Pitch dial',
+      gender: 'Gender dial',
+      reverb: 'Reverb dial',
+      echo: 'Echo dial',
     },
     buttons: {
       fader1Mute: 'Mute A',
@@ -176,7 +187,73 @@ export const en = {
     families: {
       none: 'Nothing',
       audio: 'Audio',
+      profile: 'Switch profile',
       bank: 'Pad bank',
+    },
+    audioKind: 'Kind of action',
+    audioKinds: {
+      mute: 'Mute or open a track',
+      route: 'Cut a track toward one output',
+      volume: 'Set a volume',
+    },
+    route: {
+      input: 'Track',
+      output: 'Output',
+      hint: 'One cell of the routing grid: for instance Music to the Broadcast Mix, without touching the headphones.',
+      modes: { off: 'Cut', on: 'Send', toggle: 'Switch' },
+      heldModes: {
+        off: 'Cut while pressed',
+        on: 'Sent while pressed',
+        toggle: 'Reversed while pressed',
+      },
+    },
+    volume: {
+      modes: { set: 'Set to', up: 'Raise by', down: 'Lower by' },
+      amount: 'Amount',
+      percent: '{percent}%',
+      hint: 'Raise and lower do nothing while the app does not know this volume. Set it once first, with “Set to” or in Channels.',
+    },
+    profile: {
+      kind: 'What to switch',
+      kinds: {
+        profile: 'The whole profile',
+        mix: 'The mix only',
+        mic: 'The microphone only',
+        controls: 'The controls only',
+      },
+      name: 'Name',
+      warning: 'The app switches at once and does not ask. Changes that are not saved are lost.',
+      missing: '“{name}” no longer exists: this button does nothing until you choose another.',
+      none: 'Nothing saved yet',
+    },
+    wheel: {
+      hint: 'A dial can set the volume of a track. Where the dial stands in its travel is the volume: the bottom is 0%, the top is 100%, and the ring of lights of the dial shows it. For about a second after you give a dial a job, it is being measured and does not answer yet.',
+      action: 'What the dial does',
+      none: 'Nothing',
+      volume: 'Volume of a track',
+      step: 'Each notch moves the volume by about {step}%.',
+      stepUnknown:
+        'Each notch moves the volume by 100% divided by the number of notches of the dial, which is measured when it is given a job.',
+      unknown:
+        'Set this volume once first, in Channels or with a “Set to” button, so that the dial follows it. Until then the dial is left alone.',
+      choose: 'Choose a dial to set what it does.',
+      turnDown: 'Turn {wheel} down one notch',
+      turnUp: 'Turn {wheel} up one notch',
+      demo: 'Demo mode: the buttons next to a dial turn it on the virtual device.',
+      diag: {
+        title: 'What the app sees',
+        reading: 'The device reports {reading}.',
+        idle: 'No job: the app leaves this dial alone.',
+        unknownVolume:
+          'The volume it sets is not known yet: the dial is left alone until you set it once.',
+        waiting: 'Waiting for the next reading.',
+        measuring: 'Measuring its travel (last asked: {asked}). Do not touch it for a moment.',
+        syncing: 'Putting the dial where the volume is.',
+        ready: 'Ready: its travel goes from {low} to {high}, notch {notch} of {notches}.',
+        followOnly:
+          'Followed by how far it turns only, about {step}% a notch: its travel could not be measured, or the device did not put the dial where the volume is. It may stop at the end of its travel.',
+        refused: 'The device did not hear the last command to put it somewhere.',
+      },
     },
     target: 'What to act on',
     targetMic: 'The microphone',
@@ -198,6 +275,26 @@ export const en = {
       mic: 'mic',
       fader: 'fader {fader}',
       held: '{action} (held)',
+      route: {
+        off: 'Cut {input} to {output}',
+        on: 'Send {input} to {output}',
+        toggle: 'Switch {input} to {output}',
+      },
+      volume: {
+        set: 'Volume of {target} at {percent}%',
+        up: 'Raise {target} by {percent}%',
+        down: 'Lower {target} by {percent}%',
+      },
+      profile: {
+        profile: 'Profile {name}',
+        mix: 'Mix {name}',
+        mic: 'Mic {name}',
+        controls: 'Controls {name}',
+      },
+      wheel: 'Sets {target}',
+      wheelLive: '{target} {percent}%',
+      wheelNotch: 'notch {notch} of {notches}',
+      wheelUnknown: '{target}: not set yet',
     },
     holdNote:
       'A hold reacts the moment you press, so this button has no short, long or double press.',

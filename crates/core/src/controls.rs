@@ -4,10 +4,11 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use goxlr_hub_protocol::{Button, Channel, Fader};
+use goxlr_hub_protocol::{Button, Channel, Fader, RoutingInput, RoutingOutput, Wheel};
 use serde::{Deserialize, Serialize};
 
 use crate::gestures::{Gesture, Timing, Wanted};
+use crate::library::Kind;
 
 /// A press is long from this many milliseconds. The limits keep a press from
 /// being long before it is a press, or never.
@@ -15,6 +16,10 @@ pub const LONG_PRESS_MS: (u16, u16, u16) = (200, 500, 2000);
 
 /// A second press is waited for this many milliseconds.
 pub const DOUBLE_PRESS_MS: (u16, u16, u16) = (150, 333, 1000);
+
+/// A dial moves a volume by this many percent for each notch: the least, the
+/// one it starts with, the most.
+pub const WHEEL_STEP_PERCENT: (u8, u8, u8) = (1, 4, 10);
 
 /// What a mute action silences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +46,29 @@ pub enum MuteMode {
     Toggle,
 }
 
+/// What a route action does to a cell of the routing grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RouteMode {
+    /// Cuts the input from the output: the cell is unticked.
+    Off,
+    /// Sends the input to the output: the cell is ticked.
+    On,
+    Toggle,
+}
+
+/// What a volume action does to a volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VolumeMode {
+    /// Puts it at a percentage.
+    Set,
+    /// Raises it by a percentage of the whole range.
+    Up,
+    /// Lowers it by a percentage of the whole range.
+    Down,
+}
+
 /// The three banks of the pads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,7 +80,7 @@ pub enum Bank {
 }
 
 /// What a gesture does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -62,21 +90,106 @@ pub enum Action {
     /// Silences a track or the microphone, or opens it again. Held, it does
     /// so for as long as the button is down.
     Mute { target: AudioTarget, mode: MuteMode },
+    /// Ticks or unticks one cell of the routing grid: a track cut toward one
+    /// output only. Held, it does so for as long as the button is down.
+    Route {
+        input: RoutingInput,
+        output: RoutingOutput,
+        mode: RouteMode,
+    },
+    /// Sets, raises or lowers the volume of a track, in percent.
+    Volume {
+        target: AudioTarget,
+        mode: VolumeMode,
+        percent: u8,
+    },
+    /// Switches to a profile, or to one piece of a profile, without asking:
+    /// what is not saved is lost.
+    Profile { kind: Kind, name: String },
     /// Switches the pads to a bank.
     Bank { bank: Bank },
 }
 
 impl Action {
     /// Whether it can last as long as the button is held.
-    pub fn can_hold(self) -> bool {
-        matches!(self, Self::Mute { .. })
+    pub fn can_hold(&self) -> bool {
+        matches!(self, Self::Mute { .. } | Self::Route { .. })
+    }
+
+    /// What an action that turns something on or off wants it to be, given
+    /// what it is now. For a mute, on is silenced; for a route, on is sent.
+    pub(crate) fn wanted(&self, current: bool) -> Option<bool> {
+        match self {
+            Self::Mute { mode, .. } => Some(match mode {
+                MuteMode::Mute => true,
+                MuteMode::Unmute => false,
+                MuteMode::Toggle => !current,
+            }),
+            Self::Route { mode, .. } => Some(match mode {
+                RouteMode::On => true,
+                RouteMode::Off => false,
+                RouteMode::Toggle => !current,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The action with what it carries brought back into range.
+    fn kept_in_range(self) -> Self {
+        match self {
+            Self::Volume {
+                target,
+                mode,
+                percent,
+            } => Self::Volume {
+                target,
+                mode,
+                percent: percent.min(100),
+            },
+            other => other,
+        }
+    }
+}
+
+/// What a dial does when it is turned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum WheelAction {
+    /// The place of the dial in its travel is the volume of a track. `step`
+    /// is what a notch moves it by, in percent, for a dial that cannot be put
+    /// where the volume is and is only followed by how far it turns; a dial
+    /// that can be is not given a step to choose, the travel gives it. Files
+    /// that were written with a step, or without, are read all the same.
+    Volume {
+        target: AudioTarget,
+        #[serde(default = "starting_step")]
+        step: u8,
+    },
+}
+
+fn starting_step() -> u8 {
+    WHEEL_STEP_PERCENT.1
+}
+
+impl WheelAction {
+    fn kept_in_range(self) -> Self {
+        match self {
+            Self::Volume { target, step } => Self::Volume {
+                target,
+                step: step.clamp(WHEEL_STEP_PERCENT.0, WHEEL_STEP_PERCENT.2),
+            },
+        }
     }
 }
 
 /// The actions of one button, by gesture. A button that has a hold has no
 /// other gesture: the hold reacts as the finger lands, which leaves no time
 /// to tell the others.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ButtonActions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short: Option<Action>,
@@ -91,10 +204,10 @@ pub struct ButtonActions {
 impl ButtonActions {
     pub fn get(&self, gesture: Gesture) -> Option<Action> {
         match gesture {
-            Gesture::Short => self.short,
-            Gesture::Long => self.long,
-            Gesture::Double => self.double,
-            Gesture::Hold => self.hold,
+            Gesture::Short => self.short.clone(),
+            Gesture::Long => self.long.clone(),
+            Gesture::Double => self.double.clone(),
+            Gesture::Hold => self.hold.clone(),
         }
     }
 
@@ -122,7 +235,9 @@ impl ButtonActions {
     /// A hold keeps the others out, and the others keep a hold out. A hold
     /// can only be an action that lasts.
     fn set(&mut self, gesture: Gesture, action: Option<Action>) {
-        let action = action.filter(|action| gesture != Gesture::Hold || action.can_hold());
+        let action = action
+            .map(Action::kept_in_range)
+            .filter(|action| gesture != Gesture::Hold || action.can_hold());
         if action.is_some() {
             if gesture == Gesture::Hold {
                 *self = Self::default();
@@ -135,13 +250,22 @@ impl ButtonActions {
 
     /// Takes a hold, if there is one, over the other gestures.
     fn settled(mut self) -> Self {
-        if let Some(hold) = self.hold {
+        if let Some(hold) = self.hold.take() {
             self = Self {
                 hold: Some(hold),
                 ..Self::default()
             };
         }
         self
+    }
+
+    fn kept_in_range(self) -> Self {
+        Self {
+            short: self.short.map(Action::kept_in_range),
+            long: self.long.map(Action::kept_in_range),
+            double: self.double.map(Action::kept_in_range),
+            hold: self.hold.map(Action::kept_in_range),
+        }
     }
 }
 
@@ -153,6 +277,8 @@ pub struct Controls {
     double_press: u16,
     /// Only the buttons that do something.
     buttons: BTreeMap<Button, ButtonActions>,
+    /// Only the dials that do something.
+    wheels: BTreeMap<Wheel, WheelAction>,
 }
 
 /// What a button does when nobody chose: the mute button of a fader mutes
@@ -191,6 +317,7 @@ impl Default for Controls {
                 .map(|button| (button, starting(button)))
                 .filter(|(_, actions)| !actions.is_empty())
                 .collect(),
+            wheels: BTreeMap::new(),
         }
     }
 }
@@ -206,7 +333,7 @@ impl Controls {
     }
 
     pub fn actions(&self, button: Button) -> ButtonActions {
-        self.buttons.get(&button).copied().unwrap_or_default()
+        self.buttons.get(&button).cloned().unwrap_or_default()
     }
 
     pub fn action(&self, button: Button, gesture: Gesture) -> Option<Action> {
@@ -228,6 +355,19 @@ impl Controls {
             long: Duration::from_millis(self.long_press.into()),
             double: Duration::from_millis(self.double_press.into()),
         }
+    }
+
+    /// What a dial does, if anything.
+    pub fn wheel(&self, wheel: Wheel) -> Option<WheelAction> {
+        self.wheels.get(&wheel).copied()
+    }
+
+    /// Gives a dial something to do, or nothing.
+    pub fn set_wheel(&mut self, wheel: Wheel, action: Option<WheelAction>) {
+        match action {
+            Some(action) => self.wheels.insert(wheel, action.kept_in_range()),
+            None => self.wheels.remove(&wheel),
+        };
     }
 
     pub fn long_press(&self) -> u16 {
@@ -259,7 +399,7 @@ impl Controls {
         self.put(button, starting(button));
     }
 
-    /// Puts everything back, the times of a press included.
+    /// Puts everything back, the times of a press and the dials included.
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -289,6 +429,13 @@ impl Controls {
                     }
                 })
                 .collect(),
+            wheels: Wheel::ALL
+                .into_iter()
+                .map(|wheel| WheelView {
+                    wheel,
+                    action: self.wheel(wheel),
+                })
+                .collect(),
         }
     }
 
@@ -297,6 +444,7 @@ impl Controls {
             long_press_ms: self.long_press,
             double_press_ms: self.double_press,
             buttons: Some(self.buttons.clone()),
+            wheels: self.wheels.clone(),
         }
     }
 
@@ -311,11 +459,14 @@ impl Controls {
             for (button, actions) in buttons {
                 let mut actions = actions;
                 // What cannot last is no hold, and then the others stay.
-                if actions.hold.is_some_and(|hold| !hold.can_hold()) {
+                if actions.hold.as_ref().is_some_and(|hold| !hold.can_hold()) {
                     actions.hold = None;
                 }
-                controls.put(button, actions.settled());
+                controls.put(button, actions.kept_in_range().settled());
             }
+        }
+        for (wheel, action) in file.wheels {
+            controls.set_wheel(wheel, Some(action));
         }
         controls
     }
@@ -333,6 +484,8 @@ pub(crate) struct ControlsFile {
     double_press_ms: u16,
     #[serde(default)]
     buttons: Option<BTreeMap<Button, ButtonActions>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    wheels: BTreeMap<Wheel, WheelAction>,
 }
 
 fn starting_long() -> u16 {
@@ -351,9 +504,17 @@ pub struct ControlsView {
     pub double_press_ms: u16,
     /// Every button, in the order of the device.
     pub buttons: Vec<ButtonView>,
+    /// Every dial, in the order of the device.
+    pub wheels: Vec<WheelView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WheelView {
+    pub wheel: Wheel,
+    pub action: Option<WheelAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ButtonView {
     pub button: Button,
     pub short: Option<Action>,
@@ -642,6 +803,282 @@ mod tests {
         assert_eq!(
             fader["short"]["target"],
             serde_json::json!({ "type": "faderTrack", "fader": "b" })
+        );
+    }
+
+    fn cut(input: RoutingInput, output: RoutingOutput) -> Action {
+        Action::Route {
+            input,
+            output,
+            mode: RouteMode::Off,
+        }
+    }
+
+    fn headphones(mode: VolumeMode, percent: u8) -> Action {
+        Action::Volume {
+            target: AudioTarget::Channel {
+                channel: Channel::Headphones,
+            },
+            mode,
+            percent,
+        }
+    }
+
+    fn profile(kind: Kind, name: &str) -> Action {
+        Action::Profile {
+            kind,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn only_what_lasts_can_be_held_routes_included() {
+        let mut controls = Controls::blank();
+        let pad = Button::SamplerBottomRight;
+        let route = cut(RoutingInput::Music, RoutingOutput::BroadcastMix);
+        controls.set(pad, Gesture::Hold, Some(route.clone()));
+        assert_eq!(controls.action(pad, Gesture::Hold), Some(route));
+
+        // A volume or a profile change lasts no longer than a press: refused,
+        // and what the button had stays.
+        controls.set(pad, Gesture::Short, Some(profile(Kind::Mix, "Stream")));
+        controls.set(pad, Gesture::Hold, Some(headphones(VolumeMode::Down, 5)));
+        controls.set(pad, Gesture::Hold, Some(profile(Kind::Mix, "Stream")));
+        assert_eq!(controls.action(pad, Gesture::Hold), None);
+        assert_eq!(
+            controls.action(pad, Gesture::Short),
+            Some(profile(Kind::Mix, "Stream"))
+        );
+    }
+
+    #[test]
+    fn the_new_actions_and_the_dials_are_read_back_the_same() {
+        let mut controls = Controls::default();
+        let pad = Button::SamplerTopLeft;
+        controls.set(
+            pad,
+            Gesture::Short,
+            Some(cut(RoutingInput::Music, RoutingOutput::BroadcastMix)),
+        );
+        controls.set(pad, Gesture::Long, Some(headphones(VolumeMode::Set, 40)));
+        controls.set(pad, Gesture::Double, Some(profile(Kind::Profile, "Stream")));
+        controls.set(
+            Button::Bleep,
+            Gesture::Hold,
+            Some(Action::Route {
+                input: RoutingInput::Chat,
+                output: RoutingOutput::Headphones,
+                mode: RouteMode::On,
+            }),
+        );
+        controls.set_wheel(
+            Wheel::Pitch,
+            Some(WheelAction::Volume {
+                target: AudioTarget::Channel {
+                    channel: Channel::Headphones,
+                },
+                step: 3,
+            }),
+        );
+        controls.set_wheel(
+            Wheel::Echo,
+            Some(WheelAction::Volume {
+                target: AudioTarget::FaderTrack { fader: Fader::C },
+                step: 7,
+            }),
+        );
+        let text = toml::to_string(&controls.to_file()).unwrap();
+        assert!(text.contains("[wheels.pitch]"), "{text}");
+        assert!(text.contains("type = \"route\""), "{text}");
+        assert_eq!(
+            Controls::from_file(toml::from_str(&text).unwrap()),
+            controls,
+            "{text}"
+        );
+
+        // A file written before the dials existed has none.
+        let text = toml::to_string(&Controls::default().to_file()).unwrap();
+        assert!(!text.contains("wheels"), "{text}");
+        let old = Controls::from_file(toml::from_str(&text).unwrap());
+        assert_eq!(old.wheel(Wheel::Pitch), None);
+    }
+
+    #[test]
+    fn a_file_written_by_hand_with_the_new_actions_is_taken_with_care() {
+        let text = r#"
+            [buttons.samplerTopLeft]
+            short = { type = "route", input = "music", output = "broadcastMix", mode = "off" }
+            long = { type = "volume", target = { type = "mic" }, mode = "up", percent = 250 }
+            double = { type = "profile", kind = "mic", name = "Radio" }
+
+            [buttons.samplerTopRight]
+            hold = { type = "volume", target = { type = "mic" }, mode = "down", percent = 5 }
+            short = { type = "bank", bank = "b" }
+
+            [wheels.gender]
+            type = "volume"
+            target = { type = "channel", channel = "music" }
+            step = 90
+
+            [wheels.reverb]
+            type = "volume"
+            target = { type = "mic" }
+            step = 0
+        "#;
+        let controls = Controls::from_file(toml::from_str(text).unwrap());
+        let left = controls.actions(Button::SamplerTopLeft);
+        assert_eq!(left.long, Some(headphones_mic(VolumeMode::Up, 100)));
+        assert_eq!(left.double, Some(profile(Kind::Mic, "Radio")));
+        // What cannot be held is no hold: the rest stays.
+        let right = controls.actions(Button::SamplerTopRight);
+        assert_eq!(right.hold, None);
+        assert_eq!(right.short, Some(Action::Bank { bank: Bank::B }));
+        // A step brought into range.
+        assert_eq!(
+            controls.wheel(Wheel::Gender),
+            Some(WheelAction::Volume {
+                target: AudioTarget::Channel {
+                    channel: Channel::Music
+                },
+                step: WHEEL_STEP_PERCENT.2
+            })
+        );
+        assert_eq!(
+            controls.wheel(Wheel::Reverb),
+            Some(WheelAction::Volume {
+                target: AudioTarget::Mic,
+                step: WHEEL_STEP_PERCENT.0
+            })
+        );
+        assert_eq!(controls.wheel(Wheel::Echo), None);
+    }
+
+    fn headphones_mic(mode: VolumeMode, percent: u8) -> Action {
+        Action::Volume {
+            target: AudioTarget::Mic,
+            mode,
+            percent,
+        }
+    }
+
+    #[test]
+    fn an_action_or_a_mode_no_version_knows_makes_the_file_unreadable() {
+        for text in [
+            "[buttons.bleep]\nshort = { type = \"route\", input = \"music\", output = \"nowhere\", mode = \"off\" }",
+            "[buttons.bleep]\nshort = { type = \"route\", input = \"music\", output = \"lineOut\", mode = \"sideways\" }",
+            "[buttons.bleep]\nshort = { type = \"volume\", target = { type = \"mic\" }, mode = \"set\", percent = -3 }",
+            "[buttons.bleep]\nshort = { type = \"profile\", kind = \"nothing\", name = \"x\" }",
+            "[wheels.pitch]\ntype = \"pitch\"",
+            "[wheels.spin]\ntype = \"volume\"\ntarget = { type = \"mic\" }\nstep = 3",
+        ] {
+            assert!(toml::from_str::<ControlsFile>(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_dial_is_read_with_the_step_that_was_chosen_or_without_one() {
+        let text = r#"
+            [wheels.pitch]
+            type = "volume"
+            target = { type = "channel", channel = "headphones" }
+            step = 7
+
+            [wheels.gender]
+            type = "volume"
+            target = { type = "channel", channel = "headphones" }
+        "#;
+        let controls = Controls::from_file(toml::from_str(text).unwrap());
+        let volume = |step| {
+            Some(WheelAction::Volume {
+                target: AudioTarget::Channel {
+                    channel: Channel::Headphones,
+                },
+                step,
+            })
+        };
+        // The step that was chosen is kept for a dial that is only followed.
+        assert_eq!(controls.wheel(Wheel::Pitch), volume(7));
+        assert_eq!(controls.wheel(Wheel::Gender), volume(WHEEL_STEP_PERCENT.1));
+    }
+
+    #[test]
+    fn dials_are_given_a_volume_or_nothing_and_go_back_with_everything() {
+        let mut controls = Controls::default();
+        let volume = |step| {
+            Some(WheelAction::Volume {
+                target: AudioTarget::Mic,
+                step,
+            })
+        };
+        controls.set_wheel(Wheel::Pitch, volume(50));
+        assert_eq!(
+            controls.wheel(Wheel::Pitch),
+            volume(WHEEL_STEP_PERCENT.2),
+            "brought into range"
+        );
+        controls.set_wheel(Wheel::Pitch, None);
+        assert_eq!(controls.wheel(Wheel::Pitch), None);
+        assert_eq!(controls, Controls::default());
+
+        controls.set_wheel(Wheel::Gender, volume(4));
+        // One button back to what it was leaves the dials alone.
+        controls.reset_button(Button::MicMute);
+        assert!(controls.wheel(Wheel::Gender).is_some());
+        controls.reset();
+        assert_eq!(controls, Controls::default());
+    }
+
+    #[test]
+    fn the_interface_receives_the_new_actions_and_every_dial() {
+        let mut controls = Controls::default();
+        controls.set(
+            Button::SamplerTopLeft,
+            Gesture::Short,
+            Some(cut(RoutingInput::Music, RoutingOutput::BroadcastMix)),
+        );
+        controls.set(
+            Button::SamplerTopLeft,
+            Gesture::Long,
+            Some(profile(Kind::Controls, "Live")),
+        );
+        controls.set_wheel(
+            Wheel::Reverb,
+            Some(WheelAction::Volume {
+                target: AudioTarget::FaderTrack { fader: Fader::B },
+                step: 4,
+            }),
+        );
+        let view = serde_json::to_value(controls.view()).unwrap();
+        let pad = view["buttons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["button"] == "samplerTopLeft")
+            .unwrap();
+        assert_eq!(
+            pad["short"],
+            serde_json::json!({
+                "type": "route", "input": "music", "output": "broadcastMix", "mode": "off"
+            })
+        );
+        assert_eq!(
+            pad["long"],
+            serde_json::json!({ "type": "profile", "kind": "controls", "name": "Live" })
+        );
+        let wheels = view["wheels"].as_array().unwrap();
+        assert_eq!(
+            wheels
+                .iter()
+                .map(|w| w["wheel"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["pitch", "gender", "reverb", "echo"]
+        );
+        assert!(wheels[0]["action"].is_null());
+        assert_eq!(
+            wheels[2]["action"],
+            serde_json::json!({
+                "type": "volume", "target": { "type": "faderTrack", "fader": "b" }, "step": 4
+            })
         );
     }
 }

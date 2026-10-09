@@ -105,6 +105,20 @@ impl Default for Recognizer {
 }
 
 impl Recognizer {
+    /// What the buttons do has changed: a gesture begun under the old
+    /// buttons must not end under the new ones. A press that was waited on
+    /// for a second one is dropped, a button still going down is spent until
+    /// it comes up. A hold goes on: it ends as it began.
+    pub fn buttons_changed(&mut self) {
+        for state in &mut self.states {
+            *state = match *state {
+                State::Waiting { .. } => State::Idle,
+                State::Down { .. } => State::Spent,
+                other => other,
+            };
+        }
+    }
+
     /// Takes a reading of the device and says what it means for each button.
     /// Meant to be called at every reading, even when nothing moved: waiting
     /// is part of a gesture.

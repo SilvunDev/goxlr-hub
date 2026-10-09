@@ -94,6 +94,8 @@ export const fr: Messages = {
     connecting: 'Connexion…',
     fader: 'Fader',
     source: 'Piste du fader {fader}',
+    openControls: 'Régler le bouton de coupure du fader {fader} dans Touches',
+    buttonSettings: 'Réglage du bouton',
     mute: 'Couper {channel}',
     mic: 'Micro',
     micHint: 'Comme le bouton micro de la GoXLR : personne ne vous entend, quoi que dise la table.',
@@ -104,9 +106,10 @@ export const fr: Messages = {
   },
   pads: {
     title: 'Pads du sampler',
-    hint: 'Ils s’allument ici quand vous appuyez dessus sur la GoXLR. Choisissez ce qu’ils font dans Touches.',
+    hint: 'Ils s’allument ici quand vous appuyez dessus sur la GoXLR. Cliquez sur l’un d’eux pour choisir ce qu’il fait dans Touches.',
     pressed: '{pad}, appuyé',
     released: '{pad}, relâché',
+    open: 'Régler {pad} dans Touches',
     names: {
       samplerSelectA: 'Banque A',
       samplerSelectB: 'Banque B',
@@ -128,8 +131,16 @@ export const fr: Messages = {
     blocks: {
       faders: 'Faders',
       mic: 'Micro',
+      wheels: 'Molettes',
       effects: 'Effets',
       sampler: 'Sampler',
+    },
+    faderHint: 'La piste sous chaque fader. Changez-la ici ou sur la Table.',
+    wheels: {
+      pitch: 'Molette hauteur',
+      gender: 'Molette genre',
+      reverb: 'Molette réverbe',
+      echo: 'Molette écho',
     },
     buttons: {
       fader1Mute: 'Coupure A',
@@ -175,7 +186,75 @@ export const fr: Messages = {
     families: {
       none: 'Rien',
       audio: 'Audio',
+      profile: 'Changer de profil',
       bank: 'Banque de pads',
+    },
+    audioKind: 'Sorte d’action',
+    audioKinds: {
+      mute: 'Couper ou rouvrir une piste',
+      route: 'Couper une piste vers une seule sortie',
+      volume: 'Régler un volume',
+    },
+    route: {
+      input: 'Piste',
+      output: 'Sortie',
+      hint: 'Une case de la grille de routage : par exemple la musique vers le mix de diffusion, sans toucher au casque.',
+      modes: { off: 'Couper', on: 'Envoyer', toggle: 'Basculer' },
+      heldModes: {
+        off: 'Coupé tant qu’on appuie',
+        on: 'Envoyé tant qu’on appuie',
+        toggle: 'Inversé tant qu’on appuie',
+      },
+    },
+    volume: {
+      modes: { set: 'Mettre à', up: 'Monter de', down: 'Baisser de' },
+      amount: 'Quantité',
+      percent: '{percent} %',
+      hint: 'Monter et baisser ne font rien tant que l’appli ne connaît pas ce volume. Réglez-le une première fois, avec « Mettre à » ou dans Pistes audio.',
+    },
+    profile: {
+      kind: 'Ce qu’il faut changer',
+      kinds: {
+        profile: 'Le profil entier',
+        mix: 'Le mixage seulement',
+        mic: 'Le micro seulement',
+        controls: 'Les touches seulement',
+      },
+      name: 'Nom',
+      warning:
+        'L’appli change tout de suite et ne demande rien. Les modifications non enregistrées sont perdues.',
+      missing: '« {name} » n’existe plus : ce bouton ne fait rien tant que vous n’en choisissez pas un autre.',
+      none: 'Rien d’enregistré pour l’instant',
+    },
+    wheel: {
+      hint: 'Une molette peut régler le volume d’une piste. La place de la molette dans sa course est le volume : le bas est 0 %, le haut est 100 %, et l’anneau de voyants de la molette le montre. Pendant environ une seconde après qu’on lui a donné un rôle, la molette est mesurée et ne répond pas encore.',
+      action: 'Ce que fait la molette',
+      none: 'Rien',
+      volume: 'Volume d’une piste',
+      step: 'Chaque cran déplace le volume d’environ {step} %.',
+      stepUnknown:
+        'Chaque cran déplace le volume de 100 % divisé par le nombre de crans de la molette, qui est mesuré quand on lui donne un rôle.',
+      unknown:
+        'Réglez ce volume une première fois (dans Pistes audio, ou avec une touche « Mettre à ») pour que la molette le suive. Tant qu’il est inconnu, la molette est laissée tranquille.',
+      choose: 'Choisissez une molette pour régler ce qu’elle fait.',
+      turnDown: 'Tourner {wheel} d’un cran vers le bas',
+      turnUp: 'Tourner {wheel} d’un cran vers le haut',
+      demo: 'Mode découverte : les boutons à côté d’une molette la tournent sur l’appareil virtuel.',
+      diag: {
+        title: 'Ce que voit l’appli',
+        reading: 'L’appareil indique {reading}.',
+        idle: 'Pas de rôle : l’appli laisse cette molette tranquille.',
+        unknownVolume:
+          'Le volume qu’elle règle n’est pas encore connu : la molette est laissée tranquille tant que vous ne l’avez pas réglé une fois.',
+        waiting: 'En attente de la prochaine lecture.',
+        measuring:
+          'Mesure de sa course (dernière demande : {asked}). Ne la touchez pas un instant.',
+        syncing: 'La molette est mise là où est le volume.',
+        ready: 'Prête : sa course va de {low} à {high}, cran {notch} sur {notches}.',
+        followOnly:
+          'Suivie seulement par la distance dont on la tourne, environ {step} % par cran : sa course n’a pas pu être mesurée, ou l’appareil n’a pas mis la molette là où est le volume. Elle peut buter en bout de course.',
+        refused: 'L’appareil n’a pas entendu la dernière commande qui la place quelque part.',
+      },
     },
     target: 'Sur quoi agir',
     targetMic: 'Le micro',
@@ -197,6 +276,26 @@ export const fr: Messages = {
       mic: 'le micro',
       fader: 'le fader {fader}',
       held: '{action} (maintien)',
+      route: {
+        off: 'Couper {input} vers {output}',
+        on: 'Envoyer {input} vers {output}',
+        toggle: 'Basculer {input} vers {output}',
+      },
+      volume: {
+        set: 'Mettre {target} à {percent} %',
+        up: 'Monter {target} de {percent} %',
+        down: 'Baisser {target} de {percent} %',
+      },
+      profile: {
+        profile: 'Profil {name}',
+        mix: 'Mixage {name}',
+        mic: 'Micro {name}',
+        controls: 'Touches {name}',
+      },
+      wheel: 'Règle {target}',
+      wheelLive: '{target} {percent} %',
+      wheelNotch: 'cran {notch} sur {notches}',
+      wheelUnknown: '{target} : pas encore réglé',
     },
     holdNote:
       'Un maintien réagit dès que vous appuyez : ce bouton n’a donc ni appui court, ni long, ni double.',

@@ -53,6 +53,24 @@ impl Fader {
 }
 
 listed_enum! {
+    /// One of the four dials, left to right: named after the voice effect each
+    /// one sets by default.
+    Wheel { Pitch, Gender, Reverb, Echo }
+}
+
+impl Wheel {
+    pub const COUNT: usize = Self::ALL.len();
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn from_index(index: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(index)).copied()
+    }
+}
+
+listed_enum! {
     /// A physical button. The value is its bit in the status word.
     Button {
         EffectSelect1 = 0,

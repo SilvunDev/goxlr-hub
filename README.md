@@ -26,10 +26,13 @@ microphone section sets the microphone type and gain, the noise gate, the
 compressor, the equaliser and the de-esser, next to a live level meter, and
 each of them goes back to neutral with one button. The Controls screen chooses
 what each of the 24 buttons does, for four ways of pressing it: short, long,
-double, or held. For now the actions mute a track or the microphone (while the
-button is held, if you like) and switch the pad bank. Without a GoXLR it shows
-a built-in virtual device, in demo mode, where profiles can be prepared and
-where the buttons of the Controls screen can be clicked.
+double, or held. For now the actions mute a track or the microphone, cut a
+track toward one output only (a cell of the routing grid), set, raise or lower
+a volume, switch the pad bank, and switch profile, or only one piece of a
+profile (mute and cut actions can last while the button is held). The four
+dials can each be given the volume of a track. Without a GoXLR it shows a
+built-in virtual device, in demo mode, where profiles can be prepared and where
+the buttons and dials of the Controls screen can be clicked.
 
 Settings reach the GoXLR at once and are saved when you ask: a banner says
 when something is not saved, and quitting asks first. A profile is made of
@@ -41,6 +44,21 @@ plain TOML files in the configuration folder of the app.
 A button that has a double press waits a third of a second before its short
 press goes, to be sure no second press follows. A button with a hold has no
 other gesture. The buttons work as long as the app runs, window closed or not.
+
+A button that switches profile does it at once and does not ask: changes that
+are not saved are lost, and the Controls screen says so when the action is
+chosen. The place of a dial in its travel is the volume it sets: the bottom is
+0%, the top is 100%, the ring of lights of the dial shows it, and the dial
+stops by itself at both ends. Each notch moves the volume by 100% divided by
+the number of notches of the travel, which the app measures for about a second
+when the dial is given a job. When the volume changes by other means (the
+screen, a button, a fader, a profile, another dial), the app puts the dial
+where the new volume is. A dial that the device does not put where the volume
+is is only followed by how far it turns, a few percent a notch, and can then
+stop at the end of its travel; the Controls screen says so. A volume the app
+does not know yet (a track on no fader that was never set) is left alone by a
+button that raises or lowers it, and its dial is not touched: set it once
+first.
 
 Each file says which format it is written in. A file made by a newer version
 of the app is neither loaded nor overwritten by an older one. The first time

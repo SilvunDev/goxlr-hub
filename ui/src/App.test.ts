@@ -313,7 +313,7 @@ describe('App', () => {
       expect(screen.getByText('0.0 dB')).toBeTruthy();
     });
 
-    it('lights the sampler pads that are held on the device, and only shows them', async () => {
+    it('lights the sampler pads that are held on the device, and opens their case on a click', async () => {
       render(App);
       await report(snapshot());
       const pads = within(screen.getByRole('region', { name: 'Sampler pads' }));
@@ -327,7 +327,8 @@ describe('App', () => {
         'Bottom right, released',
         'Clear, released',
       ]);
-      expect(pads.queryByRole('button')).toBeNull();
+      // Each one is a way into its case in Controls, and nothing else.
+      expect(pads.getAllByRole('button')).toHaveLength(8);
 
       await report(snapshot({ pressed: ['samplerTopRight', 'samplerSelectB', 'fader1Mute'] }));
       expect(pads.getByLabelText('Top right, pressed')).toBeTruthy();

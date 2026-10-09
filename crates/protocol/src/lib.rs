@@ -25,5 +25,5 @@ pub use response::{
 };
 pub use types::{
     Button, ButtonLight, ButtonLights, ButtonSet, Channel, Fader, MicType, OutputSet, RoutingInput,
-    RoutingOutput, Side,
+    RoutingOutput, Side, Wheel,
 };

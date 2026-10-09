@@ -1,6 +1,6 @@
 use goxlr_hub_protocol::{
     ButtonLights, Channel, EffectKey, Fader, FirmwareInfo, MicParamKey, MicType, OutputSet, Packet,
-    Request, RoutingInput, SerialInfo, Side, Status, decode_mic_level,
+    Request, RoutingInput, SerialInfo, Side, Status, Wheel, decode_mic_level,
 };
 
 use crate::{Device, DeviceError, DeviceInfo, DeviceKind};
@@ -104,6 +104,10 @@ impl<L: Link> Device for Session<L> {
 
     fn set_muted(&mut self, channel: Channel, muted: bool) -> Result<(), DeviceError> {
         self.send(Request::SetMuted { channel, muted })
+    }
+
+    fn set_encoder(&mut self, wheel: Wheel, value: i8) -> Result<(), DeviceError> {
+        self.send(Request::SetEncoderValue { wheel, value })
     }
 
     fn set_mic_input_muted(&mut self, muted: bool) -> Result<(), DeviceError> {

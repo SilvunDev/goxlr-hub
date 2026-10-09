@@ -11,13 +11,13 @@ mod virtual_device;
 
 use goxlr_hub_protocol::{
     ButtonLights, Channel, EffectKey, Fader, MicParamKey, MicType, OutputSet, ProtocolError,
-    RoutingInput, Status,
+    RoutingInput, Status, Wheel,
 };
 use thiserror::Error;
 
 pub use hardware::{HardwareLink, OpenError, open_hardware, rival};
 pub use session::{Link, Session};
-pub use virtual_device::{VirtualGoXlr, VirtualHandle, VirtualState, open_virtual};
+pub use virtual_device::{PastTheEnd, VirtualGoXlr, VirtualHandle, VirtualState, open_virtual};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -63,6 +63,10 @@ pub trait Device: Send {
     fn set_volume(&mut self, channel: Channel, volume: u8) -> Result<(), DeviceError>;
 
     fn set_muted(&mut self, channel: Channel, muted: bool) -> Result<(), DeviceError>;
+
+    /// Puts a dial at a position. The device keeps it within its travel, and
+    /// `status` tells where it kept it.
+    fn set_encoder(&mut self, wheel: Wheel, value: i8) -> Result<(), DeviceError>;
 
     /// Silences the microphone itself, whatever its channel is set to.
     fn set_mic_input_muted(&mut self, muted: bool) -> Result<(), DeviceError>;

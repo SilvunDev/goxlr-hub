@@ -76,7 +76,7 @@ fn serve(
         let left = until.saturating_duration_since(Instant::now());
         match asks.recv_timeout(left) {
             Ok(Ask::Intent(intent)) => {
-                if let Err(error) = studio.apply(intent) {
+                if let Err(error) = studio.apply(intent.clone()) {
                     eprintln!("could not apply {intent:?}: {error}");
                 }
             }
