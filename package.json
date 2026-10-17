@@ -14,7 +14,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.12.1"
+    "@tauri-apps/api": "^2.12.4"
   },
   "devDependencies": {
     "@fontsource-variable/martian-mono": "^5.3.0",
